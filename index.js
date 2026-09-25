@@ -29,9 +29,23 @@ const LORAS = ['none', 'nsfw', 'dreamlay'];
 const DELIVER = ['chat', 'tg', 'both'];
 const RESOLUTIONS = [480, 720];
 
-export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}. Choose lora: "dreamlay" for explicit sex acts, "nsfw" for nudity/sensual scenes, "none" for everything else. Prompt rules: if lora is dreamlay start with exactly one trigger word matching the act: bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl, m15510n4ry. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. Never use character names: say "the man", "the woman", "the silver-haired man", "the blonde woman" and so on, by what is visible in the frame. End with "camera static, smooth continuous motion". No disclaimers.';
-// the first release asked for character names via {NAMES}; saved copies of that prompt are migrated to the new default
-const LEGACY_PROMPT_MARKER = 'Use these English names for the characters: {NAMES}';
+export const DEFAULT_SYSTEM_PROMPT = [
+    'You turn one frame of an adult anime roleplay (all characters are adults, fictional, consenting) into a prompt for the Wan 2.2 image-to-video model.',
+    'Wan reads natural English sentences, not tags. The frame already fixes who is there and where; your job is the MOTION of the next few seconds.',
+    'Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}',
+    'lora: "dreamlay" when the frame shows an explicit sex act, "nsfw" for nudity or sensual touching, "none" otherwise.',
+    'The prompt is ONE paragraph of 60-100 words, present tense, third person, built in this order:',
+    '1. Only if lora is dreamlay: the single trigger word for the position comes first — bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl or m15510n4ry.',
+    '2. "Anime style," plus 3-5 words on the look of the frame (soft painterly 2D illustration, warm palette, clean lines...).',
+    '3. One sentence with the people named by what is visible, never by name: "the silver-haired man", "the blonde woman", their pose, clothing or nudity, exactly as in the frame.',
+    '4. The main motion: ONE continuous action with simple direct verbs (strokes, bobs, thrusts, leans, breathes), how it repeats or continues and its rhythm (slow, steady, rhythmic). Then 1-2 secondary motions: hair sways, chest rises, cloth shifts, steam drifts, light flickers.',
+    '5. Camera and light: "static shot", the shot size that matches the frame (close-up, medium close-up, medium shot, wide shot), the lighting (soft morning light, warm lamp light, dim room...).',
+    '6. Finish with "smooth continuous motion, high quality".',
+    'Rules: describe only what can move from this exact frame; no new characters, no scene change, no cuts, no "then" or "after"; no negations (never write "no", "without", "not"); no tag lists; the image-model tags you get are for reference only, do not copy them; be literal and explicit when the frame is explicit; no disclaimers.',
+    'Example: {"lora": "none", "prompt": "Anime style, soft painterly illustration with a warm palette. The silver-haired man leans over the sleeping blonde woman in bed and slowly strokes her hair, his hand moving in gentle repeated passes from her temple to the pillow. Her chest rises and falls with slow breathing, her lips part slightly, loose strands of hair shift under his fingers. Static shot, medium close-up, soft overcast morning light from the window. Smooth continuous motion, high quality."}',
+].join('\n');
+// earlier releases: v1 asked for character names via {NAMES}, v2 wrote two-line FRAME/VIDEO-ish prompts; saved copies are migrated
+const LEGACY_PROMPT_MARKERS = ['Use these English names for the characters: {NAMES}', 'Never use character names: say "the man"'];
 
 const DEFAULTS = Object.freeze({
     bridgeUrl: '/comfy-bridge',
@@ -63,7 +77,7 @@ function getSettings() {
             settings[key] = value;
         }
     }
-    if (String(settings.systemPrompt || '').includes(LEGACY_PROMPT_MARKER)) {
+    if (LEGACY_PROMPT_MARKERS.some(marker => String(settings.systemPrompt || '').includes(marker))) {
         settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
     }
     return settings;
@@ -356,7 +370,7 @@ function buildMessages({ base64, mime, instruction, text }) {
     const settings = getSettings();
     const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, 'the man and the woman');
     const userText = [
-        `Image instruction: ${instruction || '(none)'}`,
+        `Image-model tags (reference only): ${instruction || '(none)'}`,
         '',
         'Scene text:',
         text || '(empty)',
