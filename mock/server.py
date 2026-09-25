@@ -294,8 +294,10 @@ def fake_vision_answer(body):
         for part in m["content"] if isinstance(part, dict) and part.get("type") == "text"
     )
     continuation = "Continue the motion from this frame" in user_text
+    system_text = " ".join(str(m.get("content")) for m in messages if isinstance(m, dict) and m.get("role") == "system")
     log(f"vision request: model={body.get('model')} messages={len(messages)} system={system_seen} "
         f"text_chars={text_len} continuation={continuation} :: {image_info}")
+    log(f"  system prompt starts: {system_text[:70]!r}; catalogue block: {'Available LoRA sets:' in system_text}")
     if continuation:
         # string form of "lora" — the extension must accept both a string and an array
         answer = {
