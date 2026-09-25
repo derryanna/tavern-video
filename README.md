@@ -27,8 +27,7 @@ Wan 2.2 image-to-video → попап с правкой промпта → за�
    используется его обёртка, иначе создаётся своя `.tv-img-wrap`. Кнопка 40×40 px, на телефонах видна всегда.
 2. По клику собираются: картинка (`fetch(src)` → base64, оригинальное разрешение; webp/gif перекодируются в PNG),
    текст `data-iig-instruction`, текст сообщения без HTML (последние 1500 символов), `context.name1` (юзер) и `context.name2` (персонаж).
-3. Vision-модели через выбранный профиль Connection Manager уходят два сообщения: `system` (промпт из настроек, `{NAMES}` заменяется
-   полем «Имена») и `user` с частями `text` + `image_url` (data URL). Ожидается JSON `{"lora":"none|nsfw|dreamlay","prompt":"..."}`;
+3. Vision-модели через выбранный профиль Connection Manager уходят два сообщения: `system` (промпт из настроек; имён персонажей модель не получает и пишет «the man / the woman») и `user` с частями `text` + `image_url` (data URL). Ожидается JSON `{"lora":"none|nsfw|dreamlay","prompt":"..."}`;
    лишний текст/```json-обёртка вырезаются, при невалидном JSON весь ответ идёт как промпт, lora — из настроек.
    Путь по умолчанию — `ConnectionManagerRequestService.sendRequest` (`/scripts/extensions/shared.js`). Если профиль не Chat Completion,
    запрос упал, или включён флажок «Слать запрос напрямую», используется прямой `POST /api/backends/chat-completions/generate`
@@ -57,7 +56,6 @@ Wan 2.2 image-to-video → попап с правкой промпта → за�
 | Секунды / Разрешение | Длина ролика и `res` (480/720) по умолчанию для попапа. | 5 / 480 |
 | LoRA по умолчанию / Сила | LoRA, если модель не вернула валидный JSON; сила добавляется как `lora:["dreamlay:1.0"]`. | none / 1.0 |
 | Куда отправлять | `chat` / `tg` / `both` — значение радио по умолчанию. | чат |
-| Имена | Подставляется вместо `{NAMES}` в системном промпте, например `Хатак=Hatake, Аврора=Aurora`. Если пусто — `name2, name1`. | пусто |
 | Системный промпт | Текст system-сообщения для vision-модели, кнопка **сброс** возвращает промпт по умолчанию. | см. `DEFAULT_SYSTEM_PROMPT` в `index.js` |
 
 Всё хранится в `extension_settings['tavern_video']`, сохраняется через `saveSettingsDebounced()`.

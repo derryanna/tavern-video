@@ -29,7 +29,9 @@ const LORAS = ['none', 'nsfw', 'dreamlay'];
 const DELIVER = ['chat', 'tg', 'both'];
 const RESOLUTIONS = [480, 720];
 
-export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}. Choose lora: "dreamlay" for explicit sex acts, "nsfw" for nudity/sensual scenes, "none" for everything else. Prompt rules: if lora is dreamlay start with exactly one trigger word matching the act: bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl, m15510n4ry. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
+export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}. Choose lora: "dreamlay" for explicit sex acts, "nsfw" for nudity/sensual scenes, "none" for everything else. Prompt rules: if lora is dreamlay start with exactly one trigger word matching the act: bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl, m15510n4ry. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. Never use character names: say "the man", "the woman", "the silver-haired man", "the blonde woman" and so on, by what is visible in the frame. End with "camera static, smooth continuous motion". No disclaimers.';
+// the first release asked for character names via {NAMES}; saved copies of that prompt are migrated to the new default
+const LEGACY_PROMPT_MARKER = 'Use these English names for the characters: {NAMES}';
 
 const DEFAULTS = Object.freeze({
     bridgeUrl: '/comfy-bridge',
@@ -41,7 +43,6 @@ const DEFAULTS = Object.freeze({
     lora: 'none',
     loraStrength: 1.0,
     deliver: 'chat',
-    names: '',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     maxTokens: 800,
 });
@@ -62,6 +63,9 @@ function getSettings() {
             settings[key] = value;
         }
     }
+    if (String(settings.systemPrompt || '').includes(LEGACY_PROMPT_MARKER)) {
+        settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+    }
     return settings;
 }
 
@@ -73,69 +77,28 @@ const SETTINGS_HTML = `
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <label for="tv_bridge_url">Адрес бриджа</label>
-            <input id="tv_bridge_url" class="text_pole" type="text" placeholder="/comfy-bridge" autocomplete="off">
-            <div class="tv-hint">Относительный путь (/comfy-bridge) или полный URL (http://192.168.0.5:8787).</div>
-
-            <label for="tv_bridge_key">Ключ бриджа</label>
-            <input id="tv_bridge_key" class="text_pole" type="password" placeholder="Bearer-ключ" autocomplete="new-password">
-
-            <label for="tv_profile">Профиль подключения (vision-модель)</label>
-            <select id="tv_profile" class="text_pole"></select>
-
-            <label class="checkbox_label" for="tv_direct">
-                <input id="tv_direct" type="checkbox">
-                <span>Слать запрос напрямую (если модель не видит картинку через Connection Manager)</span>
-            </label>
-
-            <div class="tv-row">
-                <div>
-                    <label for="tv_sec">Секунды</label>
-                    <input id="tv_sec" class="text_pole" type="number" min="1" max="60" step="1">
-                </div>
-                <div>
-                    <label for="tv_res">Разрешение</label>
-                    <select id="tv_res" class="text_pole">
-                        <option value="480">480</option>
-                        <option value="720">720</option>
-                    </select>
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-plug"></i> Мост</h4>
+                <div class="tv-row"><label for="tv_bridge_url">Адрес</label><input id="tv_bridge_url" class="text_pole" type="text" placeholder="/comfy-bridge" autocomplete="off"></div>
+                <div class="tv-row"><label for="tv_bridge_key">Ключ</label><input id="tv_bridge_key" class="text_pole" type="password" placeholder="пусто = ключ из SLAY" autocomplete="new-password"><div id="tv_key_toggle" class="menu_button tv-key-toggle" title="Показать / скрыть"><i class="fa-solid fa-eye"></i></div></div>
+                <div class="tv-row"><label for="tv_profile">Профиль</label><select id="tv_profile" class="text_pole"></select></div>
+                <p class="tv-hint">Профиль Connection Manager с моделью, которая видит картинки (Gemini Flash подходит).</p>
+                <label class="checkbox_label tv-check" for="tv_direct"><input id="tv_direct" type="checkbox"><span>Слать запрос напрямую (если через профиль модель не видит картинку)</span></label>
+                <div id="tv_test" class="menu_button tv-test"><i class="fa-solid fa-wifi"></i> Тест</div>
             </div>
-
-            <div class="tv-row">
-                <div>
-                    <label for="tv_lora">LoRA по умолчанию</label>
-                    <select id="tv_lora" class="text_pole">
-                        <option value="none">none</option>
-                        <option value="nsfw">nsfw</option>
-                        <option value="dreamlay">dreamlay</option>
-                    </select>
-                </div>
-                <div>
-                    <label for="tv_lora_strength">Сила LoRA</label>
-                    <input id="tv_lora_strength" class="text_pole" type="number" min="0" max="2" step="0.05">
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-sliders"></i> Параметры видео</h4>
+                <div class="tv-row"><label for="tv_sec">Секунды</label><input id="tv_sec" class="text_pole" type="number" min="1" max="10" step="1"></div>
+                <div class="tv-row"><label for="tv_res">Разрешение</label><select id="tv_res" class="text_pole"><option value="480">480p</option><option value="720">720p</option></select></div>
+                <div class="tv-row"><label for="tv_lora">LoRA</label><select id="tv_lora" class="text_pole"><option value="none">none</option><option value="nsfw">nsfw</option><option value="dreamlay">dreamlay</option></select></div>
+                <div class="tv-row"><label for="tv_lora_strength">Сила LoRA</label><input id="tv_lora_strength" class="text_pole" type="number" min="0" max="2" step="0.05"></div>
+                <p class="tv-hint">LoRA модель выбирает сама по кадру; это значение — запасное, если она не ответила JSON-ом. В попапе всё можно поменять.</p>
+                <div class="tv-row"><label for="tv_deliver">Куда</label><select id="tv_deliver" class="text_pole"><option value="chat">чат</option><option value="tg">телеграм</option><option value="both">оба</option></select></div>
             </div>
-
-            <label for="tv_deliver">Куда отправлять</label>
-            <select id="tv_deliver" class="text_pole">
-                <option value="chat">чат</option>
-                <option value="tg">телеграм</option>
-                <option value="both">оба</option>
-            </select>
-
-            <label for="tv_names">Имена</label>
-            <input id="tv_names" class="text_pole" type="text" placeholder="Хатак=Hatake, Аврора=Aurora" autocomplete="off">
-            <div class="tv-hint">Подставляется вместо {NAMES} в системном промпте.</div>
-
-            <div class="flex-container justifySpaceBetween alignItemsCenter">
-                <label for="tv_sysprompt">Системный промпт</label>
-                <div id="tv_sysprompt_reset" class="menu_button menu_button_icon" title="Вернуть промпт по умолчанию">
-                    <i class="fa-solid fa-rotate-left"></i>
-                    <span>сброс</span>
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-brain"></i> Промпт для модели <div id="tv_sysprompt_reset" class="menu_button tv-reset" title="Вернуть промпт по умолчанию"><i class="fa-solid fa-rotate-left"></i> сброс</div></h4>
+                <textarea id="tv_sysprompt" class="text_pole" rows="8"></textarea>
             </div>
-            <textarea id="tv_sysprompt" class="text_pole textarea_compact" rows="8"></textarea>
         </div>
     </div>
 </div>`;
@@ -173,7 +136,6 @@ function bindSettingsUi() {
     const $lora = $('#tv_lora').val(settings.lora);
     const $strength = $('#tv_lora_strength').val(settings.loraStrength);
     const $deliver = $('#tv_deliver').val(settings.deliver);
-    const $names = $('#tv_names').val(settings.names);
     const $sysprompt = $('#tv_sysprompt').val(settings.systemPrompt);
     populateProfiles();
 
@@ -183,13 +145,31 @@ function bindSettingsUi() {
     $key.on('input', () => { settings.bridgeKey = String($key.val()).trim(); save(); });
     $direct.on('change', () => { settings.direct = $direct.prop('checked'); save(); });
     $('#tv_profile').on('change', function () { settings.profileId = String($(this).val() || ''); save(); });
-    $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 60, DEFAULTS.sec); save(); });
+    $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 10, DEFAULTS.sec); save(); });
     $res.on('change', () => { settings.res = RESOLUTIONS.includes(Number($res.val())) ? Number($res.val()) : DEFAULTS.res; save(); });
     $lora.on('change', () => { settings.lora = LORAS.includes(String($lora.val())) ? String($lora.val()) : 'none'; save(); });
     $strength.on('input', () => { settings.loraStrength = clampFloat($strength.val(), 0, 2, DEFAULTS.loraStrength); save(); });
     $deliver.on('change', () => { settings.deliver = DELIVER.includes(String($deliver.val())) ? String($deliver.val()) : 'chat'; save(); });
-    $names.on('input', () => { settings.names = String($names.val()).trim(); save(); });
     $sysprompt.on('input', () => { settings.systemPrompt = String($sysprompt.val()); save(); });
+    $('#tv_key_toggle').on('click', () => {
+        const show = $key.attr('type') === 'password';
+        $key.attr('type', show ? 'text' : 'password');
+        $('#tv_key_toggle i').toggleClass('fa-eye', !show).toggleClass('fa-eye-slash', show);
+    });
+    $('#tv_test').on('click', async function () {
+        const $btn = $(this);
+        if ($btn.hasClass('testing')) return;
+        $btn.addClass('testing');
+        try {
+            const r = await bridgeFetchJson('/', { method: 'GET' });
+            if (r?.ok) toastr.success(`Мост на связи · ComfyUI ${r.comfy || '?'}`, TOAST_TITLE);
+            else toastr.warning(`Мост отвечает, но ComfyUI ${r?.comfy || 'не отвечает'}`, TOAST_TITLE);
+        } catch (error) {
+            toastr.error(String(error?.message || error), TOAST_TITLE);
+        } finally {
+            $btn.removeClass('testing');
+        }
+    });
     $('#tv_sysprompt_reset').on('click', () => {
         settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
         $sysprompt.val(DEFAULT_SYSTEM_PROMPT);
@@ -372,14 +352,13 @@ function getProfile(profileId) {
     return profiles.find(p => p.id === profileId) ?? null;
 }
 
-function buildMessages({ base64, mime, instruction, text, name1, name2 }) {
+function buildMessages({ base64, mime, instruction, text }) {
     const settings = getSettings();
-    const names = String(settings.names || '').trim() || [name2, name1].filter(Boolean).join(', ');
-    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, names);
+    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, 'the man and the woman');
     const userText = [
         `Image instruction: ${instruction || '(none)'}`,
         '',
-        `Scene text (user: ${name1 || 'User'}; character: ${name2 || 'Character'}):`,
+        'Scene text:',
         text || '(empty)',
     ].join('\n');
     return [
@@ -532,7 +511,7 @@ async function showJobPopup({ prompt, lora, previewSrc }) {
         <div class="tv-grid">
             <label>LoRA <select id="tv_p_lora" class="text_pole">${loraOptions}</select></label>
             <label>Сила <input id="tv_p_strength" class="text_pole" type="number" min="0" max="2" step="0.05" value="${escapeHtml(settings.loraStrength)}"></label>
-            <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="60" step="1" value="${escapeHtml(settings.sec)}"></label>
+            <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="10" step="1" value="${escapeHtml(settings.sec)}"></label>
             <label>Разрешение <select id="tv_p_res" class="text_pole">${resOptions}</select></label>
             <label>Seed <input id="tv_p_seed" class="text_pole" type="number" step="1" placeholder="случайный"></label>
         </div>
@@ -547,7 +526,7 @@ async function showJobPopup({ prompt, lora, previewSrc }) {
             prompt: String(wrapper.querySelector('#tv_p_prompt').value || '').trim(),
             lora: LORAS.includes(loraValue) ? loraValue : 'none',
             loraStrength: clampFloat(wrapper.querySelector('#tv_p_strength').value, 0, 2, settings.loraStrength),
-            sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 60, settings.sec),
+            sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 10, settings.sec),
             res: clampInt(wrapper.querySelector('#tv_p_res').value, 1, 4096, settings.res),
             seed: seedRaw === '' ? null : clampInt(seedRaw, -2147483648, 4294967295, null),
             deliver: wrapper.querySelector('input[name="tv_p_deliver"]:checked')?.value || settings.deliver,
@@ -925,7 +904,7 @@ async function onVideoButtonClick(img, wrap, btn) {
         const { base64, mime } = await imageToBase64(img);
         const instruction = img.getAttribute('data-iig-instruction') || '';
         const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
-        const answer = await askVisionModel({ base64, mime, instruction, text, name1: context.name1, name2: context.name2 });
+        const answer = await askVisionModel({ base64, mime, instruction, text });
 
         renderStatus(wrap, '');
         const params = await showJobPopup({ prompt: answer.prompt, lora: answer.lora, previewSrc: img.currentSrc || src });
