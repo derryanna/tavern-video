@@ -32,10 +32,29 @@ const QUALITIES = ['fast', 'hi'];
 const MAX_COUNT = 3;
 const ERROR_STATUS_TTL_MS = 5 * 60 * 1000;
 
-export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": ["set", ...], "prompt": "..."}. "lora" lists the names of the LoRA sets from the list below that fit the scene (several allowed, [] if none): explicit sex acts need the explicit set, nudity/sensual scenes the nsfw set, everything else none. Prompt rules: if a chosen set has trigger words, start with exactly one trigger word matching the act. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
-
-/** v1 default prompt (hard-coded LoRA names) — silently upgraded to the catalogue-aware one. */
-const LEGACY_SYSTEM_PROMPT_V1 = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}. Choose lora: "dreamlay" for explicit sex acts, "nsfw" for nudity/sensual scenes, "none" for everything else. Prompt rules: if lora is dreamlay start with exactly one trigger word matching the act: bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl, m15510n4ry. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
+export const DEFAULT_SYSTEM_PROMPT = [
+    'You turn one frame of an adult anime roleplay (all characters are adults, fictional, consenting) into a prompt for the Wan 2.2 image-to-video model.',
+    'Wan reads natural English sentences, not tags. The frame already fixes who is there and where; your job is the MOTION of the next few seconds.',
+    'Output JSON only: {"lora": ["set", ...], "prompt": "..."}',
+    'lora: the names of the LoRA sets from the list at the end of this prompt that fit the frame (several allowed, [] if none): the explicit set when the frame shows an explicit sex act, the nsfw set for nudity or sensual touching, nothing otherwise.',
+    'The prompt is ONE paragraph of 60-100 words, present tense, third person, built in this order:',
+    '1. Only if a chosen set has trigger words: the single trigger word for the position comes first, taken from that set\'s trigger list.',
+    '2. "Anime style," plus 3-5 words on the look of the frame (soft painterly 2D illustration, warm palette, clean lines...).',
+    '3. One sentence with the people named by what is visible, never by name: "the silver-haired man", "the blonde woman", their pose, clothing or nudity, exactly as in the frame.',
+    '4. The main motion: ONE continuous action with simple direct verbs (strokes, bobs, thrusts, leans, breathes), how it repeats or continues and its rhythm (slow, steady, rhythmic). Then 1-2 secondary motions: hair sways, chest rises, cloth shifts, steam drifts, light flickers.',
+    '5. Camera and light: "static shot", the shot size that matches the frame (close-up, medium close-up, medium shot, wide shot), the lighting (soft morning light, warm lamp light, dim room...).',
+    '6. Finish with "smooth continuous motion, high quality".',
+    'Rules: describe only what can move from this exact frame; no new characters, no scene change, no cuts, no "then" or "after"; no negations (never write "no", "without", "not"); no tag lists; the image-model tags you get are for reference only, do not copy them; be literal and explicit when the frame is explicit; no disclaimers.',
+    'Example: {"lora": [], "prompt": "Anime style, soft painterly illustration with a warm palette. The silver-haired man leans over the sleeping blonde woman in bed and slowly strokes her hair, his hand moving in gentle repeated passes from her temple to the pillow. Her chest rises and falls with slow breathing, her lips part slightly, loose strands of hair shift under his fingers. Static shot, medium close-up, soft overcast morning light from the window. Smooth continuous motion, high quality."}',
+].join('\n');
+// earlier releases: v1 asked for character names via {NAMES}, v2 wrote two-line FRAME/VIDEO-ish prompts, v3 and the first
+// catalogue-aware prompt hard-coded the LoRA names; saved copies of those are migrated to the current default
+const LEGACY_PROMPT_MARKERS = [
+    'Use these English names for the characters: {NAMES}',
+    'Never use character names: say "the man"',
+    '{"lora": "none|nsfw|dreamlay"',
+    'lists the names of the LoRA sets from the list below',
+];
 
 const DEFAULTS = Object.freeze({
     bridgeUrl: '/comfy-bridge',
@@ -49,7 +68,6 @@ const DEFAULTS = Object.freeze({
     count: 1,
     negExtra: '',
     deliver: 'chat',
-    names: '',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     maxTokens: 800,
 });
@@ -70,11 +88,12 @@ function getSettings() {
             settings[key] = value;
         }
     }
-    if (settings.systemPrompt === LEGACY_SYSTEM_PROMPT_V1) {
+    if (LEGACY_PROMPT_MARKERS.some(marker => String(settings.systemPrompt || '').includes(marker))) {
         settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
     }
     delete settings.lora;
     delete settings.loraStrength;
+    delete settings.names;
     return settings;
 }
 
@@ -86,85 +105,35 @@ const SETTINGS_HTML = `
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <label for="tv_bridge_url">Адрес бриджа</label>
-            <input id="tv_bridge_url" class="text_pole" type="text" placeholder="/comfy-bridge" autocomplete="off">
-            <div class="tv-hint">Относительный путь (/comfy-bridge) или полный URL (http://192.168.0.5:8787).</div>
-
-            <label for="tv_bridge_key">Ключ бриджа</label>
-            <input id="tv_bridge_key" class="text_pole" type="password" placeholder="Bearer-ключ" autocomplete="new-password">
-
-            <label for="tv_profile">Профиль подключения (vision-модель)</label>
-            <select id="tv_profile" class="text_pole"></select>
-
-            <label class="checkbox_label" for="tv_direct">
-                <input id="tv_direct" type="checkbox">
-                <span>Слать запрос напрямую (если модель не видит картинку через Connection Manager)</span>
-            </label>
-
-            <div class="tv-row">
-                <div>
-                    <label for="tv_sec">Секунды</label>
-                    <input id="tv_sec" class="text_pole" type="number" min="1" max="60" step="1">
-                </div>
-                <div>
-                    <label for="tv_res">Разрешение</label>
-                    <select id="tv_res" class="text_pole">
-                        <option value="480">480</option>
-                        <option value="720">720</option>
-                    </select>
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-plug"></i> Мост</h4>
+                <div class="tv-row"><label for="tv_bridge_url">Адрес</label><input id="tv_bridge_url" class="text_pole" type="text" placeholder="/comfy-bridge" autocomplete="off"></div>
+                <div class="tv-row"><label for="tv_bridge_key">Ключ</label><input id="tv_bridge_key" class="text_pole" type="password" placeholder="пусто = ключ из SLAY" autocomplete="new-password"><div id="tv_key_toggle" class="menu_button tv-key-toggle" title="Показать / скрыть"><i class="fa-solid fa-eye"></i></div></div>
+                <div class="tv-row"><label for="tv_profile">Профиль</label><select id="tv_profile" class="text_pole"></select></div>
+                <p class="tv-hint">Профиль Connection Manager с моделью, которая видит картинки (Gemini Flash подходит).</p>
+                <label class="checkbox_label tv-check" for="tv_direct"><input id="tv_direct" type="checkbox"><span>Слать запрос напрямую (если через профиль модель не видит картинку)</span></label>
+                <div id="tv_test" class="menu_button tv-test"><i class="fa-solid fa-wifi"></i> Тест</div>
             </div>
-
-            <div class="tv-row">
-                <div>
-                    <label for="tv_quality">Качество</label>
-                    <select id="tv_quality" class="text_pole">
-                        <option value="fast">быстро</option>
-                        <option value="hi">лучше</option>
-                    </select>
-                </div>
-                <div>
-                    <label for="tv_count">Роликов</label>
-                    <input id="tv_count" class="text_pole" type="number" min="1" max="3" step="1">
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-sliders"></i> Параметры видео</h4>
+                <div class="tv-row"><label for="tv_sec">Секунды</label><input id="tv_sec" class="text_pole" type="number" min="1" max="10" step="1"></div>
+                <div class="tv-row"><label for="tv_res">Разрешение</label><select id="tv_res" class="text_pole"><option value="480">480p</option><option value="720">720p</option></select></div>
+                <div class="tv-row"><label for="tv_quality">Качество</label><select id="tv_quality" class="text_pole"><option value="fast">быстро</option><option value="hi">лучше</option></select></div>
+                <div class="tv-row"><label for="tv_count">Роликов</label><input id="tv_count" class="text_pole" type="number" min="1" max="3" step="1"></div>
+                <label class="checkbox_label tv-check" for="tv_smooth"><input id="tv_smooth" type="checkbox"><span>32 fps (интерполяция)</span></label>
+                <div class="tv-row"><label for="tv_neg_extra">Негатив</label><input id="tv_neg_extra" class="text_pole" type="text" placeholder="что не должно появиться (neg_extra)" autocomplete="off"></div>
+                <div class="tv-row"><label for="tv_deliver">Куда</label><select id="tv_deliver" class="text_pole"><option value="chat">чат</option><option value="tg">телеграм</option><option value="both">оба</option></select></div>
+                <p class="tv-hint">Это значения по умолчанию для попапа — там всё можно поменять. LoRA-сеты модель выбирает сама по кадру из каталога ниже.</p>
             </div>
-            <label class="checkbox_label" for="tv_smooth">
-                <input id="tv_smooth" type="checkbox">
-                <span>32 fps (интерполяция)</span>
-            </label>
-
-            <label for="tv_neg_extra">Негатив (дополнительно)</label>
-            <input id="tv_neg_extra" class="text_pole" type="text" placeholder="что не должно появиться" autocomplete="off">
-
-            <label for="tv_deliver">Куда отправлять</label>
-            <select id="tv_deliver" class="text_pole">
-                <option value="chat">чат</option>
-                <option value="tg">телеграм</option>
-                <option value="both">оба</option>
-            </select>
-
-            <label for="tv_names">Имена</label>
-            <input id="tv_names" class="text_pole" type="text" placeholder="Хатак=Hatake, Аврора=Aurora" autocomplete="off">
-            <div class="tv-hint">Подставляется вместо {NAMES} в системном промпте.</div>
-
-            <div class="flex-container justifySpaceBetween alignItemsCenter">
-                <label for="tv_sysprompt">Системный промпт</label>
-                <div id="tv_sysprompt_reset" class="menu_button menu_button_icon" title="Вернуть промпт по умолчанию">
-                    <i class="fa-solid fa-rotate-left"></i>
-                    <span>сброс</span>
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-layer-group"></i> Каталог LoRA <div id="tv_lora_refresh" class="menu_button tv-reset" title="Перечитать каталог с моста"><i class="fa-solid fa-rotate"></i> обновить</div></h4>
+                <div id="tv_lora_catalog" class="tv-catalog tv-hint">каталог ещё не загружен</div>
             </div>
-            <textarea id="tv_sysprompt" class="text_pole textarea_compact" rows="8"></textarea>
-            <div class="tv-hint">В конец промпта автоматически добавляется список LoRA-сетов с бриджа (Available LoRA sets: …).</div>
-
-            <div class="flex-container justifySpaceBetween alignItemsCenter">
-                <label>Каталог LoRA (с бриджа)</label>
-                <div id="tv_lora_refresh" class="menu_button menu_button_icon" title="Перечитать каталог с бриджа">
-                    <i class="fa-solid fa-rotate"></i>
-                    <span>обновить</span>
-                </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-brain"></i> Промпт для модели <div id="tv_sysprompt_reset" class="menu_button tv-reset" title="Вернуть промпт по умолчанию"><i class="fa-solid fa-rotate-left"></i> сброс</div></h4>
+                <textarea id="tv_sysprompt" class="text_pole" rows="8"></textarea>
+                <p class="tv-hint">В конец промпта автоматически добавляется список LoRA-сетов с моста (Available LoRA sets: …).</p>
             </div>
-            <div id="tv_lora_catalog" class="tv-catalog tv-hint">каталог ещё не загружен</div>
         </div>
     </div>
 </div>`;
@@ -204,7 +173,6 @@ function bindSettingsUi() {
     const $smooth = $('#tv_smooth').prop('checked', !!settings.smooth);
     const $negExtra = $('#tv_neg_extra').val(settings.negExtra);
     const $deliver = $('#tv_deliver').val(settings.deliver);
-    const $names = $('#tv_names').val(settings.names);
     const $sysprompt = $('#tv_sysprompt').val(settings.systemPrompt);
     populateProfiles();
 
@@ -214,15 +182,33 @@ function bindSettingsUi() {
     $key.on('input', () => { settings.bridgeKey = String($key.val()).trim(); save(); });
     $direct.on('change', () => { settings.direct = $direct.prop('checked'); save(); });
     $('#tv_profile').on('change', function () { settings.profileId = String($(this).val() || ''); save(); });
-    $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 60, DEFAULTS.sec); save(); });
+    $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 10, DEFAULTS.sec); save(); });
     $res.on('change', () => { settings.res = RESOLUTIONS.includes(Number($res.val())) ? Number($res.val()) : DEFAULTS.res; save(); });
     $quality.on('change', () => { settings.quality = QUALITIES.includes(String($quality.val())) ? String($quality.val()) : 'fast'; save(); });
     $count.on('input', () => { settings.count = clampInt($count.val(), 1, MAX_COUNT, 1); save(); });
     $smooth.on('change', () => { settings.smooth = $smooth.prop('checked'); save(); });
     $negExtra.on('input', () => { settings.negExtra = String($negExtra.val()).trim(); save(); });
     $deliver.on('change', () => { settings.deliver = DELIVER.includes(String($deliver.val())) ? String($deliver.val()) : 'chat'; save(); });
-    $names.on('input', () => { settings.names = String($names.val()).trim(); save(); });
     $sysprompt.on('input', () => { settings.systemPrompt = String($sysprompt.val()); save(); });
+    $('#tv_key_toggle').on('click', () => {
+        const show = $key.attr('type') === 'password';
+        $key.attr('type', show ? 'text' : 'password');
+        $('#tv_key_toggle i').toggleClass('fa-eye', !show).toggleClass('fa-eye-slash', show);
+    });
+    $('#tv_test').on('click', async function () {
+        const $btn = $(this);
+        if ($btn.hasClass('testing')) return;
+        $btn.addClass('testing');
+        try {
+            const r = await bridgeFetchJson('/', { method: 'GET' });
+            if (r?.ok) toastr.success(`Мост на связи · ComfyUI ${r.comfy || '?'}`, TOAST_TITLE);
+            else toastr.warning(`Мост отвечает, но ComfyUI ${r?.comfy || 'не отвечает'}`, TOAST_TITLE);
+        } catch (error) {
+            toastr.error(String(error?.message || error), TOAST_TITLE);
+        } finally {
+            $btn.removeClass('testing');
+        }
+    });
     $('#tv_sysprompt_reset').on('click', () => {
         settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
         $sysprompt.val(DEFAULT_SYSTEM_PROMPT);
@@ -445,8 +431,23 @@ function resolveBridgeFileUrl(url) {
     return bridgeUrl(value);
 }
 
+/**
+ * Bridge key: the extension's own setting, or — when it is empty — the key SLAY Images
+ * already uses for the same comfy-bridge endpoint (so the tavern needs it typed in once).
+ */
+function effectiveBridgeKey() {
+    const own = String(getSettings().bridgeKey || '').trim();
+    if (own) return own;
+    const slay = extension_settings?.slay_image_gen;
+    // SLAY stores the endpoint without a leading slash ("comfy-bridge/v1/chat/completions"), compare path-insensitively
+    const norm = (v) => String(v || '').trim().replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '').toLowerCase();
+    const base = norm(getSettings().bridgeUrl || DEFAULTS.bridgeUrl);
+    if (slay?.apiKey && base && norm(slay.endpoint).startsWith(base)) return String(slay.apiKey).trim();
+    return '';
+}
+
 function bridgeHeaders(extra = {}) {
-    const key = String(getSettings().bridgeKey || '').trim();
+    const key = effectiveBridgeKey();
     const headers = { ...extra };
     if (key) headers['Authorization'] = `Bearer ${key}`;
     return headers;
@@ -526,10 +527,9 @@ function getProfile(profileId) {
     return profiles.find(p => p.id === profileId) ?? null;
 }
 
-function buildMessages({ base64, mime, instruction, text, name1, name2, continueFrom = null }) {
+function buildMessages({ base64, mime, instruction, text, continueFrom = null }) {
     const settings = getSettings();
-    const names = String(settings.names || '').trim() || [name2, name1].filter(Boolean).join(', ');
-    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, names)
+    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, 'the man and the woman')
         + '\n\n' + loraCatalogPromptBlock();
     const lines = [];
     if (continueFrom !== null) {
@@ -538,9 +538,9 @@ function buildMessages({ base64, mime, instruction, text, name1, name2, continue
         lines.push('');
     }
     lines.push(
-        `Image instruction: ${instruction || '(none)'}`,
+        `Image-model tags (reference only): ${instruction || '(none)'}`,
         '',
-        `Scene text (user: ${name1 || 'User'}; character: ${name2 || 'Character'}):`,
+        'Scene text:',
         text || '(empty)',
     );
     const userText = lines.join('\n');
@@ -724,7 +724,7 @@ async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Ви
         <div class="tv-lora-head"><span>LoRA</span><span class="tv-hint">галочка = сет уходит в рендер, число = сила</span></div>
         <div class="tv-lora-list">${renderLoraChecklist(loras)}</div>
         <div class="tv-grid">
-            <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="60" step="1" value="${escapeHtml(settings.sec)}"></label>
+            <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="10" step="1" value="${escapeHtml(settings.sec)}"></label>
             <label>Разрешение <select id="tv_p_res" class="text_pole">${resOptions}</select></label>
             <label>Seed <input id="tv_p_seed" class="text_pole" type="number" step="1" placeholder="случайный"></label>
             <label>Качество <select id="tv_p_quality" class="text_pole">${qualityOptions}</select></label>
@@ -751,7 +751,7 @@ async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Ви
         captured = {
             prompt: String(wrapper.querySelector('#tv_p_prompt').value || '').trim(),
             loras: pickedLoras,
-            sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 60, settings.sec),
+            sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 10, settings.sec),
             res: clampInt(wrapper.querySelector('#tv_p_res').value, 1, 4096, settings.res),
             seed: seedRaw === '' ? null : clampInt(seedRaw, -2147483648, 4294967295, null),
             quality: QUALITIES.includes(wrapper.querySelector('#tv_p_quality').value) ? wrapper.querySelector('#tv_p_quality').value : 'fast',
@@ -1301,7 +1301,6 @@ async function fetchLastFrame(jobId) {
  */
 async function onContinueClick({ mesId, fromJobId, btn, img = null }) {
     const settings = getSettings();
-    const context = getContext();
     const chatId = currentChatId();
     const message = getMessage(mesId);
     if (!message) {
@@ -1333,8 +1332,7 @@ async function onContinueClick({ mesId, fromJobId, btn, img = null }) {
         const instruction = sourceImg?.getAttribute('data-iig-instruction') || '';
         const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
         const answer = await askVisionModel({
-            base64: frame.base64, mime: frame.mime, instruction, text,
-            name1: context.name1, name2: context.name2, continueFrom: record.prompt || '',
+            base64: frame.base64, mime: frame.mime, instruction, text, continueFrom: record.prompt || '',
         });
 
         renderStatusFor(chatId, mesId, src);
@@ -1379,7 +1377,7 @@ async function onVideoButtonClick(img, wrap, btn) {
         const { base64, mime } = await imageToBase64(img);
         const instruction = img.getAttribute('data-iig-instruction') || '';
         const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
-        const answer = await askVisionModel({ base64, mime, instruction, text, name1: context.name1, name2: context.name2 });
+        const answer = await askVisionModel({ base64, mime, instruction, text });
 
         renderStatusFor(chatId, mesId, src);
         const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: img.currentSrc || src });
