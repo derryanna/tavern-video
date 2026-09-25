@@ -17,6 +17,7 @@ Endpoints (prefix is empty by default, see --prefix):
 
 The fake render takes --queue-seconds in the queue and --render-seconds rendering,
 then returns a tiny embedded mp4 (or the file given with --video).
+A prompt containing "[fail]" (or starting the mock with --fail) ends the job with status=error.
 """
 
 import argparse
@@ -167,9 +168,9 @@ def render_worker(job_id):
     log(f"job {job_id}: rendering ({ARGS.render_seconds}s)")
     time.sleep(ARGS.render_seconds)
     with LOCK:
-        if ARGS.fail:
+        if ARGS.fail or "[fail]" in job["request"].get("prompt", "").lower():
             job["status"] = "error"
-            job["error"] = "mock render failed (started with --fail)"
+            job["error"] = "mock render failed" + (" (started with --fail)" if ARGS.fail else " (prompt contains [fail])")
         else:
             job["status"] = "done"
             job["video_url"] = f"{ARGS.prefix.rstrip('/')}/video/jobs/{job_id}/file"
