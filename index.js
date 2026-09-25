@@ -25,11 +25,13 @@ const MAX_TEXT_CHARS = 1500;
 const MAX_POLL_ERRORS = 6;
 const DONE_STATUS_TTL_MS = 15000;
 
-const LORAS = ['none', 'nsfw', 'dreamlay'];
 const DELIVER = ['chat', 'tg', 'both'];
 const RESOLUTIONS = [480, 720];
 
-export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}. Choose lora: "dreamlay" for explicit sex acts, "nsfw" for nudity/sensual scenes, "none" for everything else. Prompt rules: if lora is dreamlay start with exactly one trigger word matching the act: bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl, m15510n4ry. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
+export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": ["set", ...], "prompt": "..."}. "lora" lists the names of the LoRA sets from the list below that fit the scene (several allowed, [] if none): explicit sex acts need the explicit set, nudity/sensual scenes the nsfw set, everything else none. Prompt rules: if a chosen set has trigger words, start with exactly one trigger word matching the act. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
+
+/** v1 default prompt (hard-coded LoRA names) — silently upgraded to the catalogue-aware one. */
+const LEGACY_SYSTEM_PROMPT_V1 = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}. Choose lora: "dreamlay" for explicit sex acts, "nsfw" for nudity/sensual scenes, "none" for everything else. Prompt rules: if lora is dreamlay start with exactly one trigger word matching the act: bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl, m15510n4ry. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
 
 const DEFAULTS = Object.freeze({
     bridgeUrl: '/comfy-bridge',
@@ -38,8 +40,6 @@ const DEFAULTS = Object.freeze({
     direct: false,
     sec: 5,
     res: 480,
-    lora: 'none',
-    loraStrength: 1.0,
     deliver: 'chat',
     names: '',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -62,6 +62,11 @@ function getSettings() {
             settings[key] = value;
         }
     }
+    if (settings.systemPrompt === LEGACY_SYSTEM_PROMPT_V1) {
+        settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+    }
+    delete settings.lora;
+    delete settings.loraStrength;
     return settings;
 }
 
@@ -102,21 +107,6 @@ const SETTINGS_HTML = `
                 </div>
             </div>
 
-            <div class="tv-row">
-                <div>
-                    <label for="tv_lora">LoRA по умолчанию</label>
-                    <select id="tv_lora" class="text_pole">
-                        <option value="none">none</option>
-                        <option value="nsfw">nsfw</option>
-                        <option value="dreamlay">dreamlay</option>
-                    </select>
-                </div>
-                <div>
-                    <label for="tv_lora_strength">Сила LoRA</label>
-                    <input id="tv_lora_strength" class="text_pole" type="number" min="0" max="2" step="0.05">
-                </div>
-            </div>
-
             <label for="tv_deliver">Куда отправлять</label>
             <select id="tv_deliver" class="text_pole">
                 <option value="chat">чат</option>
@@ -136,6 +126,16 @@ const SETTINGS_HTML = `
                 </div>
             </div>
             <textarea id="tv_sysprompt" class="text_pole textarea_compact" rows="8"></textarea>
+            <div class="tv-hint">В конец промпта автоматически добавляется список LoRA-сетов с бриджа (Available LoRA sets: …).</div>
+
+            <div class="flex-container justifySpaceBetween alignItemsCenter">
+                <label>Каталог LoRA (с бриджа)</label>
+                <div id="tv_lora_refresh" class="menu_button menu_button_icon" title="Перечитать каталог с бриджа">
+                    <i class="fa-solid fa-rotate"></i>
+                    <span>обновить</span>
+                </div>
+            </div>
+            <div id="tv_lora_catalog" class="tv-catalog tv-hint">каталог ещё не загружен</div>
         </div>
     </div>
 </div>`;
@@ -170,8 +170,6 @@ function bindSettingsUi() {
     const $direct = $('#tv_direct').prop('checked', !!settings.direct);
     const $sec = $('#tv_sec').val(settings.sec);
     const $res = $('#tv_res').val(String(settings.res));
-    const $lora = $('#tv_lora').val(settings.lora);
-    const $strength = $('#tv_lora_strength').val(settings.loraStrength);
     const $deliver = $('#tv_deliver').val(settings.deliver);
     const $names = $('#tv_names').val(settings.names);
     const $sysprompt = $('#tv_sysprompt').val(settings.systemPrompt);
@@ -185,8 +183,6 @@ function bindSettingsUi() {
     $('#tv_profile').on('change', function () { settings.profileId = String($(this).val() || ''); save(); });
     $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 60, DEFAULTS.sec); save(); });
     $res.on('change', () => { settings.res = RESOLUTIONS.includes(Number($res.val())) ? Number($res.val()) : DEFAULTS.res; save(); });
-    $lora.on('change', () => { settings.lora = LORAS.includes(String($lora.val())) ? String($lora.val()) : 'none'; save(); });
-    $strength.on('input', () => { settings.loraStrength = clampFloat($strength.val(), 0, 2, DEFAULTS.loraStrength); save(); });
     $deliver.on('change', () => { settings.deliver = DELIVER.includes(String($deliver.val())) ? String($deliver.val()) : 'chat'; save(); });
     $names.on('input', () => { settings.names = String($names.val()).trim(); save(); });
     $sysprompt.on('input', () => { settings.systemPrompt = String($sysprompt.val()); save(); });
@@ -206,7 +202,143 @@ function bindSettingsUi() {
     if (event_types.APP_READY) {
         eventSource.on(event_types.APP_READY, () => populateProfiles());
     }
-    $('#tavern_video_settings .inline-drawer-toggle').on('click', () => populateProfiles());
+    $('#tavern_video_settings .inline-drawer-toggle').on('click', () => {
+        populateProfiles();
+        // Settings open → refresh the LoRA catalogue from the bridge.
+        refreshLoraCatalog({ force: true });
+    });
+    $('#tv_lora_refresh').on('click', () => refreshLoraCatalog({ force: true, notify: true }));
+    renderLoraCatalog();
+}
+
+// ---------------------------------------------------------------------------
+// LoRA catalogue (GET {bridgeUrl}/video/loras) — cached per page load
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} LoraSet
+ * @property {string} name
+ * @property {string[]} triggers
+ * @property {string} hint
+ * @property {number} strength
+ * @property {string} group
+ */
+
+/** @type {{ loras: LoraSet[], fetchedAt: number, error: string|null, promise: Promise<LoraSet[]>|null }} */
+const loraCatalog = { loras: [], fetchedAt: 0, error: null, promise: null };
+
+function normalizeLoraSet(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const name = String(raw.name ?? '').trim();
+    if (!name) return null;
+    const triggers = Array.isArray(raw.triggers)
+        ? raw.triggers.map(t => String(t).trim()).filter(Boolean)
+        : String(raw.triggers ?? '').split(',').map(t => t.trim()).filter(Boolean);
+    return {
+        name,
+        triggers,
+        hint: String(raw.hint ?? '').trim(),
+        strength: clampFloat(raw.strength, 0, 2, 1.0),
+        group: String(raw.group ?? '').trim(),
+    };
+}
+
+/**
+ * Loads the catalogue once per page load; `force` re-fetches (settings opened / refresh button).
+ * Never throws: on failure the previous catalogue (or an empty one) is kept and `loraCatalog.error` is set.
+ * @returns {Promise<LoraSet[]>}
+ */
+async function fetchLoraCatalog({ force = false } = {}) {
+    if (!force && loraCatalog.fetchedAt) return loraCatalog.loras;
+    if (loraCatalog.promise) return loraCatalog.promise;
+    loraCatalog.promise = (async () => {
+        try {
+            const json = await bridgeFetchJson('/video/loras', { method: 'GET' });
+            const list = Array.isArray(json?.loras) ? json.loras : [];
+            loraCatalog.loras = list.map(normalizeLoraSet).filter(Boolean);
+            loraCatalog.fetchedAt = Date.now();
+            loraCatalog.error = null;
+            console.info(LOG, `LoRA catalogue: ${loraCatalog.loras.length} set(s)`);
+        } catch (error) {
+            loraCatalog.error = String(error?.message || error);
+            console.warn(LOG, 'LoRA catalogue fetch failed', error);
+        } finally {
+            loraCatalog.promise = null;
+        }
+        return loraCatalog.loras;
+    })();
+    return loraCatalog.promise;
+}
+
+async function refreshLoraCatalog({ force = false, notify = false } = {}) {
+    const el = document.getElementById('tv_lora_catalog');
+    if (el && (force || !loraCatalog.fetchedAt)) el.textContent = 'загружаю каталог…';
+    await fetchLoraCatalog({ force });
+    renderLoraCatalog();
+    if (notify) {
+        if (loraCatalog.error) toastr.error(`Каталог LoRA: ${loraCatalog.error}`, TOAST_TITLE);
+        else toastr.info(`Каталог LoRA: ${loraCatalog.loras.length} сет(ов)`, TOAST_TITLE);
+    }
+}
+
+function renderLoraCatalog() {
+    const el = document.getElementById('tv_lora_catalog');
+    if (!el) return;
+    el.innerHTML = '';
+    if (loraCatalog.error && !loraCatalog.loras.length) {
+        el.textContent = `не удалось загрузить: ${loraCatalog.error}`;
+        return;
+    }
+    if (!loraCatalog.fetchedAt) {
+        el.textContent = 'каталог ещё не загружен';
+        return;
+    }
+    if (!loraCatalog.loras.length) {
+        el.textContent = 'бридж не вернул ни одного LoRA-сета';
+        return;
+    }
+    for (const set of loraCatalog.loras) {
+        const row = document.createElement('div');
+        row.className = 'tv-catalog-row';
+        const meta = [set.group, set.triggers.length ? `триггеры: ${set.triggers.join(', ')}` : '', `сила ${formatStrength(set.strength)}`].filter(Boolean).join(' · ');
+        row.innerHTML = `<b>${escapeHtml(set.name)}</b> <span>${escapeHtml(meta)}</span>${set.hint ? `<div class="tv-catalog-hint">${escapeHtml(set.hint)}</div>` : ''}`;
+        el.appendChild(row);
+    }
+    if (loraCatalog.error) {
+        const warn = document.createElement('div');
+        warn.textContent = `(последнее обновление не удалось: ${loraCatalog.error})`;
+        el.appendChild(warn);
+    }
+}
+
+/** Text block appended to the system prompt. */
+function loraCatalogPromptBlock() {
+    if (!loraCatalog.loras.length) {
+        return 'Available LoRA sets: none (answer "lora": []).';
+    }
+    const lines = loraCatalog.loras.map(set => {
+        const triggers = set.triggers.length ? set.triggers.join(', ') : '(no trigger words)';
+        return `- ${set.name} — ${triggers} — ${set.hint || '(no hint)'}`;
+    });
+    return ['Available LoRA sets:', ...lines].join('\n');
+}
+
+/**
+ * Accepts "name", "a, b", ["a", "b"], "none"; returns catalogue sets that exist (unknown names ignored).
+ * @returns {LoraSet[]}
+ */
+function resolveLoraNames(value) {
+    let names = [];
+    if (Array.isArray(value)) names = value.map(v => String(v ?? ''));
+    else if (typeof value === 'string') names = value.split(/[,;\n]+/);
+    else if (value && typeof value === 'object' && typeof value.name === 'string') names = [value.name];
+    const wanted = names.map(n => n.trim().toLowerCase()).filter(n => n && n !== 'none');
+    const result = [];
+    for (const name of wanted) {
+        const set = loraCatalog.loras.find(s => s.name.toLowerCase() === name);
+        if (set && !result.includes(set)) result.push(set);
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +492,8 @@ function getProfile(profileId) {
 function buildMessages({ base64, mime, instruction, text, name1, name2 }) {
     const settings = getSettings();
     const names = String(settings.names || '').trim() || [name2, name1].filter(Boolean).join(', ');
-    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, names);
+    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, names)
+        + '\n\n' + loraCatalogPromptBlock();
     const userText = [
         `Image instruction: ${instruction || '(none)'}`,
         '',
@@ -440,8 +573,10 @@ function isChatCompletionProfile(profile) {
     }
 }
 
+/**
+ * @returns {{ loras: LoraSet[], prompt: string }}
+ */
 function parseModelJson(raw) {
-    const settings = getSettings();
     let text = String(raw ?? '').trim();
     text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     const start = text.indexOf('{');
@@ -449,15 +584,15 @@ function parseModelJson(raw) {
     if (start !== -1 && end > start) {
         try {
             const obj = JSON.parse(text.slice(start, end + 1));
-            const lora = LORAS.includes(String(obj.lora || '').toLowerCase()) ? String(obj.lora).toLowerCase() : settings.lora;
+            const loras = resolveLoraNames(obj.lora ?? obj.loras);
             const prompt = String(obj.prompt ?? '').trim();
-            if (prompt) return { lora, prompt };
+            if (prompt) return { loras, prompt };
         } catch (error) {
             console.warn(LOG, 'model JSON parse failed', error, text);
         }
     }
     if (!text) throw new Error('модель вернула пустой ответ');
-    return { lora: settings.lora, prompt: text };
+    return { loras: [], prompt: text };
 }
 
 async function askVisionModel(payload) {
@@ -500,9 +635,35 @@ function escapeHtml(text) {
         .replace(/"/g, '&quot;');
 }
 
-async function showJobPopup({ prompt, lora, previewSrc }) {
+/** 1 → "1.0", 0.85 → "0.85" (what the bridge expects in "set:strength"). */
+function formatStrength(value) {
+    const rounded = Math.round(Number(value) * 100) / 100;
+    return Number.isInteger(rounded) ? rounded.toFixed(1) : String(rounded);
+}
+
+function renderLoraChecklist(selected) {
+    if (!loraCatalog.loras.length) {
+        const reason = loraCatalog.error ? `каталог LoRA недоступен (${escapeHtml(loraCatalog.error)})` : 'бридж не вернул ни одного LoRA-сета';
+        return `<div class="tv-lora-empty tv-hint">${reason}</div>`;
+    }
+    return loraCatalog.loras.map((set, index) => {
+        const checked = selected.some(s => s.name === set.name) ? ' checked' : '';
+        const triggers = set.triggers.length ? set.triggers.join(', ') : '—';
+        const group = set.group ? ` <span class="tv-lora-group">${escapeHtml(set.group)}</span>` : '';
+        return `
+        <div class="tv-lora-row" title="${escapeHtml(set.hint)}">
+            <label class="tv-lora-pick">
+                <input type="checkbox" class="tv-lora-check" data-index="${index}" value="${escapeHtml(set.name)}"${checked}>
+                <b>${escapeHtml(set.name)}</b>${group}
+                <span class="tv-lora-triggers">${escapeHtml(triggers)}</span>
+            </label>
+            <input type="number" class="text_pole tv-lora-strength" data-index="${index}" min="0" max="2" step="0.05" value="${escapeHtml(formatStrength(set.strength))}" title="Сила">
+        </div>`;
+    }).join('');
+}
+
+async function showJobPopup({ prompt, loras = [], previewSrc }) {
     const settings = getSettings();
-    const loraOptions = LORAS.map(v => `<option value="${v}"${v === lora ? ' selected' : ''}>${v}</option>`).join('');
     const resOptions = RESOLUTIONS.map(v => `<option value="${v}"${v === Number(settings.res) ? ' selected' : ''}>${v}</option>`).join('');
     const deliverLabels = { chat: 'чат', tg: 'телеграм', both: 'оба' };
     const deliverRadios = DELIVER.map(v => `<label><input type="radio" name="tv_p_deliver" value="${v}"${v === settings.deliver ? ' checked' : ''}> ${deliverLabels[v]}</label>`).join('');
@@ -514,9 +675,9 @@ async function showJobPopup({ prompt, lora, previewSrc }) {
         ${previewSrc ? `<div class="tv-preview"><img src="${escapeHtml(previewSrc)}" alt=""></div>` : ''}
         <label for="tv_p_prompt">Промпт</label>
         <textarea id="tv_p_prompt" class="text_pole" rows="7"></textarea>
+        <div class="tv-lora-head"><span>LoRA</span><span class="tv-hint">галочка = сет уходит в рендер, число = сила</span></div>
+        <div class="tv-lora-list">${renderLoraChecklist(loras)}</div>
         <div class="tv-grid">
-            <label>LoRA <select id="tv_p_lora" class="text_pole">${loraOptions}</select></label>
-            <label>Сила <input id="tv_p_strength" class="text_pole" type="number" min="0" max="2" step="0.05" value="${escapeHtml(settings.loraStrength)}"></label>
             <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="60" step="1" value="${escapeHtml(settings.sec)}"></label>
             <label>Разрешение <select id="tv_p_res" class="text_pole">${resOptions}</select></label>
             <label>Seed <input id="tv_p_seed" class="text_pole" type="number" step="1" placeholder="случайный"></label>
@@ -527,11 +688,16 @@ async function showJobPopup({ prompt, lora, previewSrc }) {
     let captured = null;
     const capture = () => {
         const seedRaw = String(wrapper.querySelector('#tv_p_seed').value || '').trim();
-        const loraValue = String(wrapper.querySelector('#tv_p_lora').value || 'none');
+        const pickedLoras = [];
+        for (const check of wrapper.querySelectorAll('.tv-lora-check:checked')) {
+            const set = loraCatalog.loras[Number(check.dataset.index)];
+            if (!set) continue;
+            const strengthInput = wrapper.querySelector(`.tv-lora-strength[data-index="${check.dataset.index}"]`);
+            pickedLoras.push({ name: set.name, strength: clampFloat(strengthInput?.value, 0, 2, set.strength) });
+        }
         captured = {
             prompt: String(wrapper.querySelector('#tv_p_prompt').value || '').trim(),
-            lora: LORAS.includes(loraValue) ? loraValue : 'none',
-            loraStrength: clampFloat(wrapper.querySelector('#tv_p_strength').value, 0, 2, settings.loraStrength),
+            loras: pickedLoras,
             sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 60, settings.sec),
             res: clampInt(wrapper.querySelector('#tv_p_res').value, 1, 4096, settings.res),
             seed: seedRaw === '' ? null : clampInt(seedRaw, -2147483648, 4294967295, null),
@@ -668,7 +834,7 @@ async function createJob({ base64, mime, params, chatId, mesId }) {
         sec: params.sec,
         res: params.res,
         seed: params.seed,
-        lora: params.lora === 'none' ? [] : [`${params.lora}:${Number(params.loraStrength).toFixed(2).replace(/0$/, '')}`],
+        lora: params.loras.map(l => `${l.name}:${formatStrength(l.strength)}`),
         deliver: params.deliver,
         chat: chatId,
         message_id: mesId,
@@ -907,13 +1073,14 @@ async function onVideoButtonClick(img, wrap, btn) {
     btn.disabled = true;
     try {
         renderStatus(wrap, '🧠 придумываю промпт…');
+        await fetchLoraCatalog();
         const { base64, mime } = await imageToBase64(img);
         const instruction = img.getAttribute('data-iig-instruction') || '';
         const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
         const answer = await askVisionModel({ base64, mime, instruction, text, name1: context.name1, name2: context.name2 });
 
         renderStatus(wrap, '');
-        const params = await showJobPopup({ prompt: answer.prompt, lora: answer.lora, previewSrc: img.currentSrc || src });
+        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: img.currentSrc || src });
         if (!params) return;
 
         renderStatus(wrap, '📤 отправляю задачу…');
@@ -1059,5 +1226,6 @@ jQuery(async () => {
 
     scanChat();
     resumeJobsFromChat();
+    refreshLoraCatalog();
     console.info(LOG, 'loaded');
 });

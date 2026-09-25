@@ -8,6 +8,7 @@ without a GPU or a real model.
     python3 mock/server.py --port 8787 --key test-key
 
 Endpoints (prefix is empty by default, see --prefix):
+    GET  {prefix}/video/loras           LoRA catalogue        -> {"loras": [{"name","triggers","hint","strength","group"}]}
     POST {prefix}/video/jobs            create a job          -> {"id": "..."}
     GET  {prefix}/video/jobs/{id}       job status            -> {"status": ..., "position": n, "elapsed": s, "error": "...", "video_url": "..."}
     GET  {prefix}/video/jobs/{id}/file  the rendered mp4
@@ -104,6 +105,15 @@ C26Y5jmiPuZiVCmENbyhi4ZgABABQQ+mHjLBauaWh5/iAlQQajwqbgAkkiixdwv+4GEtNgUYswBdgxUk
 
 ARGS = None
 VIDEO_BYTES = b""
+
+# The LoRA catalogue the real bridge serves from its ComfyUI folder.
+LORA_CATALOG = [
+    {"name": "nsfw", "triggers": [], "hint": "nudity / sensual scenes, no explicit acts", "strength": 1.0, "group": "body"},
+    {"name": "dreamlay", "triggers": ["bl0wj0b", "d0ubl3_bj", "d0gg1e", "c0wg1rl", "r3v3rs3_c0wg1rl", "m15510n4ry"],
+     "hint": "explicit sex acts; start the prompt with one trigger word", "strength": 0.9, "group": "explicit"},
+    {"name": "slow_pan", "triggers": ["sl0wpan"], "hint": "slow camera pan instead of a static camera", "strength": 0.7, "group": "camera"},
+]
+LORA_NAMES = {entry["name"] for entry in LORA_CATALOG}
 JOBS = {}
 ORDER = []  # job ids in creation order (for queue positions)
 LOCK = threading.Lock()
@@ -143,6 +153,29 @@ def decode_image(value):
     elif data[:3] == b"\xff\xd8\xff":
         mime = "image/jpeg"
     return data, mime
+
+
+def parse_lora_list(value):
+    """Validates ["name:strength", ...] against the catalogue. Returns [(name, strength)]."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("lora must be a list of 'name:strength' strings")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise ValueError("lora entries must be non-empty strings")
+        name, sep, strength = item.partition(":")
+        if name not in LORA_NAMES:
+            raise ValueError(f"unknown lora set: {name!r} (known: {sorted(LORA_NAMES)})")
+        try:
+            weight = float(strength) if sep else 1.0
+        except ValueError as exc:
+            raise ValueError(f"bad strength in {item!r}") from exc
+        if not 0.0 <= weight <= 2.0:
+            raise ValueError(f"strength out of range in {item!r}")
+        result.append((name, weight))
+    return result
 
 
 def png_size(data):
@@ -231,7 +264,7 @@ def fake_vision_answer(body):
             text_len += len(content)
     log(f"vision request: model={body.get('model')} messages={len(messages)} system={system_seen} text_chars={text_len} :: {image_info}")
     answer = {
-        "lora": "nsfw",
+        "lora": ["nsfw", "unknown_set"],
         "prompt": (
             "Anime style. Seraphina slowly turns toward the viewer and brushes her hair back, "
             "her dress swaying gently in the breeze while leaves drift past. "
@@ -299,6 +332,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True, "jobs": len(JOBS)})
         if path == "/v1/models":
             return self.send_json(200, {"object": "list", "data": [{"id": "mock-vision", "object": "model"}]})
+        if path == "/video/loras":
+            if not self.authorized():
+                return self.send_json(401, {"error": "unauthorized"})
+            return self.send_json(200, {"loras": LORA_CATALOG})
         if path.startswith("/video/jobs/"):
             if not self.authorized():
                 return self.send_json(401, {"error": "unauthorized"})
@@ -346,6 +383,10 @@ class Handler(BaseHTTPRequestHandler):
             deliver = body.get("deliver") or "chat"
             if deliver not in ("chat", "tg", "both"):
                 return self.send_json(400, {"error": "deliver must be chat|tg|both"})
+            try:
+                loras = parse_lora_list(body.get("lora"))
+            except ValueError as exc:
+                return self.send_json(400, {"error": str(exc)})
             job_id = uuid.uuid4().hex[:12]
             job = {
                 "id": job_id,
@@ -365,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             log(
                 f"job {job_id}: created image={mime} {len(image)} bytes"
                 + (f" {size[0]}x{size[1]}" if size else "")
-                + f" sec={body.get('sec')} res={body.get('res')} seed={body.get('seed')} lora={body.get('lora')}"
+                + f" sec={body.get('sec')} res={body.get('res')} seed={body.get('seed')} lora={loras}"
                 + f" deliver={deliver} chat={body.get('chat')!r} message_id={body.get('message_id')}"
             )
             log(f"job {job_id}: prompt: {prompt}")
