@@ -6,8 +6,9 @@ Wan 2.2 image-to-video и выбирает LoRA-сеты из каталога �
 (ПК с ComfyUI) → готовое видео прикрепляется к сообщению как обычное ST-видео (`message.extra.media`) и/или улетает в телеграм.
 Кнопка **⏩** продолжает движение с последнего кадра готового ролика.
 
-Целевая версия SillyTavern: **1.18.0** (проверено также на 1.19.0). Нужен встроенный **Connection Manager**
-(включён по умолчанию).
+Целевая версия SillyTavern: **1.19.0** (текущий релиз, ветка `release`); работает и на **1.18.0**. Между 1.18.0 и 1.19.0 ни один из
+используемых API не менялся (`getContext()`, `ConnectionManagerRequestService`, `callGenericPopup`, `extra.media`, `/api/files/upload`,
+`/api/backends/chat-completions/generate`). Нужен встроенный **Connection Manager** (включён по умолчанию).
 
 ## Установка
 
@@ -36,7 +37,8 @@ Wan 2.2 image-to-video и выбирает LoRA-сеты из каталога �
    при невалидном JSON весь ответ идёт как промпт без LoRA.
    Путь по умолчанию — `ConnectionManagerRequestService.sendRequest` (`/scripts/extensions/shared.js`). Если профиль не Chat Completion,
    запрос упал, или включён флажок «Слать запрос напрямую», используется прямой `POST /api/backends/chat-completions/generate`
-   с `getRequestHeaders()`, `chat_completion_source` из профиля (для custom — `custom_url`/`model`/`secret_id`/прокси).
+   с `getRequestHeaders()`, `chat_completion_source` из профиля (для custom — `custom_url`/`model`/`secret_id`/прокси; в
+   `custom_include_body`/`custom_exclude_body`/`custom_include_headers` подставляются макросы ST — так же, как это делает сам ST 1.19).
 4. Попап (`callGenericPopup`), кнопки **Го / Отмена**:
    * **Промпт** — textarea.
    * **LoRA** — список галочек из каталога бриджа: имя, группа, триггер-слова и поле силы (предзаполнено из каталога);
@@ -54,7 +56,7 @@ Wan 2.2 image-to-video и выбирает LoRA-сеты из каталога �
    Готовые ролики исчезают из строки через 15 с, ошибки висят 5 минут.
 6. Когда `status: "done"` и назначение включает чат: скачивается `video_url` (с Bearer), `POST /api/files/upload`
    (`slayvideo_<ts>_<job>.mp4` → `/user/files/…`), в сообщение добавляется `extra.media.push({type: 'video', url, title})`
-   (ровно так, как это делает `ensureMessageMediaIsArray`/`appendMediaToMessage` в `public/script.js` 1.18; на старых сборках без
+   (ровно так, как это делает `ensureMessageMediaIsArray`/`appendMediaToMessage` в `public/script.js` 1.18/1.19; на старых сборках без
    `extra.media` — `extra.video = path`), `saveChat()`, перерисовка медиа сообщения. Видео появляется под сообщением с родными
    контролами ST (лупа/подпись/удалить + `<video controls>`) и переживает перезагрузку.
 
@@ -198,9 +200,15 @@ python3 mock/server.py --fail                                # каждая за
 
 ### Как тестировалось
 
-SillyTavern 1.18.0 запущен из чистого клона, расширение положено в `data/default-user/extensions/tavern-video`,
-в чат Серафины добавлены сообщения с `<img src="/user/images/…png" data-iig-instruction="test">` (одно из них — с записью
-`tavern_video` старого формата). Playwright (Chromium) прогоняет против мока:
+SillyTavern **1.19.0** (тег `1.19.0`, ранее тот же прогон на 1.18.0) запущен из чистого клона, расширение положено в
+`data/default-user/extensions/tavern-video`, в чат Серафины добавлены сообщения с `<img src="/user/images/…png" data-iig-instruction="test">`
+(одно из них — с записью `tavern_video` старого формата). Playwright (Chromium) прогоняет против мока:
+
+* на 1.19.0 (25.09.2026): панель настроек и профиль Connection Manager видны, кнопка **Тест** отвечает `ComfyUI mock`, каталог из трёх сетов;
+  🎬 на картинке → у vision-модели картинка (`512x768`), попап с предвыбранным `nsfw` и без `unknown_set`, `📤` → `⏳/🎬` → `✅ видео готово`,
+  `<video>` от ST в `.mes_media_wrapper`, `extra.media = [{type: "video", url: "/user/files/slayvideo_…mp4"}]`; ⏩ под видео → превью последнего
+  кадра (`96x64`), `POST /video/jobs` со `start_job` и без `image`, второе видео, `chain` из двух id; после перезагрузки оба видео и кнопки на месте;
+  **Отмена** без задачи; ошибок в консоли от расширения нет;
 
 * каталог LoRA виден в настройках и в попапе (галочки = выбор модели, `unknown_set` проигнорирован, сила из каталога, триггеры показаны);
 * два ролика за раз: seed 1234/1235, `quality: hi`, `smooth: true`, `neg_extra`, `lora: ["nsfw:1.0","dreamlay:0.75"]`, `deliver: both`,

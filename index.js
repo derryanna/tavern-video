@@ -11,7 +11,7 @@
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced, eventSource, event_types, getRequestHeaders } from '../../../../script.js';
+import { saveSettingsDebounced, eventSource, event_types, getRequestHeaders, substituteParams } from '../../../../script.js';
 import { callGenericPopup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { ConnectionManagerRequestService } from '../../shared.js';
 import { proxies } from '../../../openai.js';
@@ -568,6 +568,9 @@ async function directVisionRequest(profile, messages) {
     const source = apiMap?.source || 'custom';
     const proxyPreset = Array.isArray(proxies) ? proxies.find(p => p.name === profile.proxy) : null;
     const oai = context.chatCompletionSettings || {};
+    // ST 1.19 runs the custom include/exclude fields through substituteParams before sending
+    // (public/scripts/openai.js); mirror that so the direct path sees the same headers/body.
+    const macros = (value) => (typeof substituteParams === 'function' && typeof value === 'string' && value) ? substituteParams(value) : value;
 
     const body = {
         stream: false,
@@ -578,9 +581,9 @@ async function directVisionRequest(profile, messages) {
         secret_id: profile['secret-id'],
         reverse_proxy: proxyPreset?.url,
         proxy_password: proxyPreset?.password,
-        custom_include_body: oai.custom_include_body,
-        custom_exclude_body: oai.custom_exclude_body,
-        custom_include_headers: oai.custom_include_headers,
+        custom_include_body: macros(oai.custom_include_body),
+        custom_exclude_body: macros(oai.custom_exclude_body),
+        custom_include_headers: macros(oai.custom_include_headers),
         custom_prompt_post_processing: profile['prompt-post-processing'] || undefined,
         max_tokens: settings.maxTokens,
         temperature: 0.7,
@@ -1124,7 +1127,7 @@ async function uploadToSillyTavern(name, base64) {
 }
 
 /**
- * Attaches a video to a chat message the ST 1.18 way (`extra.media` array,
+ * Attaches a video to a chat message the ST 1.18+/1.19 way (`extra.media` array,
  * see `ensureMessageMediaIsArray` / `appendMediaToMessage` in public/script.js).
  * Falls back to the legacy `extra.video` string on older builds.
  */
