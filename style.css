@@ -61,10 +61,76 @@
     transform: scale(1.08);
 }
 
-.tv-btn.tv-busy {
+.tv-btn.tv-busy,
+.tv-cont-btn.tv-busy,
+.tv-video-cont.tv-busy {
     cursor: wait;
     opacity: 1;
     animation: tv-pulse 1s ease-in-out infinite;
+}
+
+/* ⏩ next to 🎬 (shown once the message has a finished clip). */
+.tv-cont-btn {
+    position: absolute;
+    right: 54px;
+    bottom: 10px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 16px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    z-index: 4;
+    opacity: 0.9;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    transition: opacity 0.2s, transform 0.15s, background 0.2s;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .tv-cont-btn {
+        opacity: 0.55;
+    }
+
+    .iig-img-wrap:hover > .tv-cont-btn,
+    .tv-img-wrap:hover > .tv-cont-btn,
+    .tv-cont-btn:focus-visible {
+        opacity: 1;
+    }
+}
+
+.tv-cont-btn:hover {
+    background: rgba(124, 77, 255, 0.9);
+    transform: scale(1.08);
+}
+
+/* "⏩ Продолжить" bar under an attached video (ST lays the container out as a flex row;
+   with our bar inside it becomes a column so the bar sits below the player). */
+.mes .mes_video_container:has(.tv-video-bar) {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.tv-video-bar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 4px 0 0;
+}
+
+.tv-video-bar .tv-video-cont {
+    font-size: 0.85em;
+    padding: 2px 10px;
+    min-height: 32px;
+    white-space: nowrap;
 }
 
 @keyframes tv-pulse {
@@ -144,6 +210,80 @@
     align-items: center;
     gap: 4px;
     cursor: pointer;
+}
+
+.tv-popup .tv-radios-sep {
+    flex: 1;
+}
+
+.tv-popup .tv-field {
+    margin-top: 8px;
+}
+
+.tv-popup .tv-field input {
+    width: 100%;
+}
+
+/* LoRA checklist in the popup */
+.tv-popup .tv-lora-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.tv-popup .tv-lora-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    max-height: 30vh;
+    overflow-y: auto;
+}
+
+.tv-popup .tv-lora-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tv-popup .tv-lora-pick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 0.92em;
+}
+
+.tv-popup .tv-lora-pick input[type="checkbox"] {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+}
+
+.tv-popup .tv-lora-group {
+    font-size: 0.8em;
+    opacity: 0.6;
+}
+
+.tv-popup .tv-lora-triggers {
+    font-size: 0.8em;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tv-popup .tv-lora-strength {
+    width: 5em;
+    flex-shrink: 0;
+}
+
+.tv-popup .tv-lora-empty {
+    padding: 4px 0;
 }
 
 /* Settings drawer — same manner as SLAY Images: sections with a header, rows "label | field" */
@@ -228,4 +368,21 @@
     min-height: 8em;
     resize: vertical;
     margin: 0;
+}
+
+.tavern-video-settings .tv-catalog {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 12em;
+    overflow-y: auto;
+}
+
+.tavern-video-settings .tv-catalog-row span {
+    opacity: 0.8;
+}
+
+.tavern-video-settings .tv-catalog-hint {
+    opacity: 0.7;
+    padding-left: 1em;
 }
