@@ -61,10 +61,69 @@
     transform: scale(1.08);
 }
 
-.tv-btn.tv-busy {
+.tv-btn.tv-busy,
+.tv-cont-btn.tv-busy,
+.tv-video-cont.tv-busy {
     cursor: wait;
     opacity: 1;
     animation: tv-pulse 1s ease-in-out infinite;
+}
+
+/* ⏩ next to 🎬 (shown once the message has a finished clip). */
+.tv-cont-btn {
+    position: absolute;
+    right: 54px;
+    bottom: 10px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 16px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    z-index: 4;
+    opacity: 0.9;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    transition: opacity 0.2s, transform 0.15s, background 0.2s;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .tv-cont-btn {
+        opacity: 0.55;
+    }
+
+    .iig-img-wrap:hover > .tv-cont-btn,
+    .tv-img-wrap:hover > .tv-cont-btn,
+    .tv-cont-btn:focus-visible {
+        opacity: 1;
+    }
+}
+
+.tv-cont-btn:hover {
+    background: rgba(124, 77, 255, 0.9);
+    transform: scale(1.08);
+}
+
+/* "⏩ Продолжить" bar under an attached video. */
+.tv-video-bar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 4px 0 0;
+}
+
+.tv-video-bar .tv-video-cont {
+    font-size: 0.85em;
+    padding: 2px 10px;
+    min-height: 32px;
 }
 
 @keyframes tv-pulse {
