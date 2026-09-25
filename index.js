@@ -276,8 +276,21 @@ function resolveBridgeFileUrl(url) {
     return bridgeUrl(value);
 }
 
+/**
+ * Bridge key: the extension's own setting, or — when it is empty — the key SLAY Images
+ * already uses for the same comfy-bridge endpoint (so the tavern needs it typed in once).
+ */
+function effectiveBridgeKey() {
+    const own = String(getSettings().bridgeKey || '').trim();
+    if (own) return own;
+    const slay = extension_settings?.slay_image_gen;
+    const base = String(getSettings().bridgeUrl || DEFAULTS.bridgeUrl).trim().replace(/\/+$/, '');
+    if (slay?.apiKey && base && String(slay.endpoint || '').includes(base)) return String(slay.apiKey).trim();
+    return '';
+}
+
 function bridgeHeaders(extra = {}) {
-    const key = String(getSettings().bridgeKey || '').trim();
+    const key = effectiveBridgeKey();
     const headers = { ...extra };
     if (key) headers['Authorization'] = `Bearer ${key}`;
     return headers;
