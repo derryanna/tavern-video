@@ -7,6 +7,7 @@
  * lets the user edit it in a popup and sends the job to a local bridge.
  * When the render is done the video is uploaded to SillyTavern and attached
  * to the message via `message.extra.media` (native ST 1.18 video attachment).
+ * ⏩ continues the motion from the last frame of a finished clip (start_job).
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
@@ -25,27 +26,35 @@ const MAX_TEXT_CHARS = 1500;
 const MAX_POLL_ERRORS = 6;
 const DONE_STATUS_TTL_MS = 15000;
 
-const LORAS = ['none', 'nsfw', 'dreamlay'];
 const DELIVER = ['chat', 'tg', 'both'];
 const RESOLUTIONS = [480, 720];
+const QUALITIES = ['fast', 'hi'];
+const MAX_COUNT = 3;
+const ERROR_STATUS_TTL_MS = 5 * 60 * 1000;
 
 export const DEFAULT_SYSTEM_PROMPT = [
     'You turn one frame of an adult anime roleplay (all characters are adults, fictional, consenting) into a prompt for the Wan 2.2 image-to-video model.',
     'Wan reads natural English sentences, not tags. The frame already fixes who is there and where; your job is the MOTION of the next few seconds.',
-    'Output JSON only: {"lora": "none|nsfw|dreamlay", "prompt": "..."}',
-    'lora: "dreamlay" when the frame shows an explicit sex act, "nsfw" for nudity or sensual touching, "none" otherwise.',
+    'Output JSON only: {"lora": ["set", ...], "prompt": "..."}',
+    'lora: the names of the LoRA sets from the list at the end of this prompt that fit the frame (several allowed, [] if none): the explicit set when the frame shows an explicit sex act, the nsfw set for nudity or sensual touching, nothing otherwise.',
     'The prompt is ONE paragraph of 60-100 words, present tense, third person, built in this order:',
-    '1. Only if lora is dreamlay: the single trigger word for the position comes first — bl0wj0b, d0ubl3_bj, d0gg1e, c0wg1rl, r3v3rs3_c0wg1rl or m15510n4ry.',
+    '1. Only if a chosen set has trigger words: the single trigger word for the position comes first, taken from that set\'s trigger list.',
     '2. "Anime style," plus 3-5 words on the look of the frame (soft painterly 2D illustration, warm palette, clean lines...).',
     '3. One sentence with the people named by what is visible, never by name: "the silver-haired man", "the blonde woman", their pose, clothing or nudity, exactly as in the frame.',
     '4. The main motion: ONE continuous action with simple direct verbs (strokes, bobs, thrusts, leans, breathes), how it repeats or continues and its rhythm (slow, steady, rhythmic). Then 1-2 secondary motions: hair sways, chest rises, cloth shifts, steam drifts, light flickers.',
     '5. Camera and light: "static shot", the shot size that matches the frame (close-up, medium close-up, medium shot, wide shot), the lighting (soft morning light, warm lamp light, dim room...).',
     '6. Finish with "smooth continuous motion, high quality".',
     'Rules: describe only what can move from this exact frame; no new characters, no scene change, no cuts, no "then" or "after"; no negations (never write "no", "without", "not"); no tag lists; the image-model tags you get are for reference only, do not copy them; be literal and explicit when the frame is explicit; no disclaimers.',
-    'Example: {"lora": "none", "prompt": "Anime style, soft painterly illustration with a warm palette. The silver-haired man leans over the sleeping blonde woman in bed and slowly strokes her hair, his hand moving in gentle repeated passes from her temple to the pillow. Her chest rises and falls with slow breathing, her lips part slightly, loose strands of hair shift under his fingers. Static shot, medium close-up, soft overcast morning light from the window. Smooth continuous motion, high quality."}',
+    'Example: {"lora": [], "prompt": "Anime style, soft painterly illustration with a warm palette. The silver-haired man leans over the sleeping blonde woman in bed and slowly strokes her hair, his hand moving in gentle repeated passes from her temple to the pillow. Her chest rises and falls with slow breathing, her lips part slightly, loose strands of hair shift under his fingers. Static shot, medium close-up, soft overcast morning light from the window. Smooth continuous motion, high quality."}',
 ].join('\n');
-// earlier releases: v1 asked for character names via {NAMES}, v2 wrote two-line FRAME/VIDEO-ish prompts; saved copies are migrated
-const LEGACY_PROMPT_MARKERS = ['Use these English names for the characters: {NAMES}', 'Never use character names: say "the man"'];
+// earlier releases: v1 asked for character names via {NAMES}, v2 wrote two-line FRAME/VIDEO-ish prompts, v3 and the first
+// catalogue-aware prompt hard-coded the LoRA names; saved copies of those are migrated to the current default
+const LEGACY_PROMPT_MARKERS = [
+    'Use these English names for the characters: {NAMES}',
+    'Never use character names: say "the man"',
+    '{"lora": "none|nsfw|dreamlay"',
+    'lists the names of the LoRA sets from the list below',
+];
 
 const DEFAULTS = Object.freeze({
     bridgeUrl: '/comfy-bridge',
@@ -54,8 +63,10 @@ const DEFAULTS = Object.freeze({
     direct: false,
     sec: 5,
     res: 480,
-    lora: 'none',
-    loraStrength: 1.0,
+    quality: 'fast',
+    smooth: false,
+    count: 1,
+    negExtra: '',
     deliver: 'chat',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     maxTokens: 800,
@@ -80,6 +91,9 @@ function getSettings() {
     if (LEGACY_PROMPT_MARKERS.some(marker => String(settings.systemPrompt || '').includes(marker))) {
         settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
     }
+    delete settings.lora;
+    delete settings.loraStrength;
+    delete settings.names;
     return settings;
 }
 
@@ -104,14 +118,21 @@ const SETTINGS_HTML = `
                 <h4><i class="fa-solid fa-sliders"></i> Параметры видео</h4>
                 <div class="tv-row"><label for="tv_sec">Секунды</label><input id="tv_sec" class="text_pole" type="number" min="1" max="10" step="1"></div>
                 <div class="tv-row"><label for="tv_res">Разрешение</label><select id="tv_res" class="text_pole"><option value="480">480p</option><option value="720">720p</option></select></div>
-                <div class="tv-row"><label for="tv_lora">LoRA</label><select id="tv_lora" class="text_pole"><option value="none">none</option><option value="nsfw">nsfw</option><option value="dreamlay">dreamlay</option></select></div>
-                <div class="tv-row"><label for="tv_lora_strength">Сила LoRA</label><input id="tv_lora_strength" class="text_pole" type="number" min="0" max="2" step="0.05"></div>
-                <p class="tv-hint">LoRA модель выбирает сама по кадру; это значение — запасное, если она не ответила JSON-ом. В попапе всё можно поменять.</p>
+                <div class="tv-row"><label for="tv_quality">Качество</label><select id="tv_quality" class="text_pole"><option value="fast">быстро</option><option value="hi">лучше</option></select></div>
+                <div class="tv-row"><label for="tv_count">Роликов</label><input id="tv_count" class="text_pole" type="number" min="1" max="3" step="1"></div>
+                <label class="checkbox_label tv-check" for="tv_smooth"><input id="tv_smooth" type="checkbox"><span>32 fps (интерполяция)</span></label>
+                <div class="tv-row"><label for="tv_neg_extra">Негатив</label><input id="tv_neg_extra" class="text_pole" type="text" placeholder="что не должно появиться (neg_extra)" autocomplete="off"></div>
                 <div class="tv-row"><label for="tv_deliver">Куда</label><select id="tv_deliver" class="text_pole"><option value="chat">чат</option><option value="tg">телеграм</option><option value="both">оба</option></select></div>
+                <p class="tv-hint">Это значения по умолчанию для попапа — там всё можно поменять. LoRA-сеты модель выбирает сама по кадру из каталога ниже.</p>
+            </div>
+            <div class="tv-section">
+                <h4><i class="fa-solid fa-layer-group"></i> Каталог LoRA <div id="tv_lora_refresh" class="menu_button tv-reset" title="Перечитать каталог с моста"><i class="fa-solid fa-rotate"></i> обновить</div></h4>
+                <div id="tv_lora_catalog" class="tv-catalog tv-hint">каталог ещё не загружен</div>
             </div>
             <div class="tv-section">
                 <h4><i class="fa-solid fa-brain"></i> Промпт для модели <div id="tv_sysprompt_reset" class="menu_button tv-reset" title="Вернуть промпт по умолчанию"><i class="fa-solid fa-rotate-left"></i> сброс</div></h4>
                 <textarea id="tv_sysprompt" class="text_pole" rows="8"></textarea>
+                <p class="tv-hint">В конец промпта автоматически добавляется список LoRA-сетов с моста (Available LoRA sets: …).</p>
             </div>
         </div>
     </div>
@@ -147,8 +168,10 @@ function bindSettingsUi() {
     const $direct = $('#tv_direct').prop('checked', !!settings.direct);
     const $sec = $('#tv_sec').val(settings.sec);
     const $res = $('#tv_res').val(String(settings.res));
-    const $lora = $('#tv_lora').val(settings.lora);
-    const $strength = $('#tv_lora_strength').val(settings.loraStrength);
+    const $quality = $('#tv_quality').val(settings.quality);
+    const $count = $('#tv_count').val(settings.count);
+    const $smooth = $('#tv_smooth').prop('checked', !!settings.smooth);
+    const $negExtra = $('#tv_neg_extra').val(settings.negExtra);
     const $deliver = $('#tv_deliver').val(settings.deliver);
     const $sysprompt = $('#tv_sysprompt').val(settings.systemPrompt);
     populateProfiles();
@@ -161,8 +184,10 @@ function bindSettingsUi() {
     $('#tv_profile').on('change', function () { settings.profileId = String($(this).val() || ''); save(); });
     $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 10, DEFAULTS.sec); save(); });
     $res.on('change', () => { settings.res = RESOLUTIONS.includes(Number($res.val())) ? Number($res.val()) : DEFAULTS.res; save(); });
-    $lora.on('change', () => { settings.lora = LORAS.includes(String($lora.val())) ? String($lora.val()) : 'none'; save(); });
-    $strength.on('input', () => { settings.loraStrength = clampFloat($strength.val(), 0, 2, DEFAULTS.loraStrength); save(); });
+    $quality.on('change', () => { settings.quality = QUALITIES.includes(String($quality.val())) ? String($quality.val()) : 'fast'; save(); });
+    $count.on('input', () => { settings.count = clampInt($count.val(), 1, MAX_COUNT, 1); save(); });
+    $smooth.on('change', () => { settings.smooth = $smooth.prop('checked'); save(); });
+    $negExtra.on('input', () => { settings.negExtra = String($negExtra.val()).trim(); save(); });
     $deliver.on('change', () => { settings.deliver = DELIVER.includes(String($deliver.val())) ? String($deliver.val()) : 'chat'; save(); });
     $sysprompt.on('input', () => { settings.systemPrompt = String($sysprompt.val()); save(); });
     $('#tv_key_toggle').on('click', () => {
@@ -200,7 +225,143 @@ function bindSettingsUi() {
     if (event_types.APP_READY) {
         eventSource.on(event_types.APP_READY, () => populateProfiles());
     }
-    $('#tavern_video_settings .inline-drawer-toggle').on('click', () => populateProfiles());
+    $('#tavern_video_settings .inline-drawer-toggle').on('click', () => {
+        populateProfiles();
+        // Settings open → refresh the LoRA catalogue from the bridge.
+        refreshLoraCatalog({ force: true });
+    });
+    $('#tv_lora_refresh').on('click', () => refreshLoraCatalog({ force: true, notify: true }));
+    renderLoraCatalog();
+}
+
+// ---------------------------------------------------------------------------
+// LoRA catalogue (GET {bridgeUrl}/video/loras) — cached per page load
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} LoraSet
+ * @property {string} name
+ * @property {string[]} triggers
+ * @property {string} hint
+ * @property {number} strength
+ * @property {string} group
+ */
+
+/** @type {{ loras: LoraSet[], fetchedAt: number, error: string|null, promise: Promise<LoraSet[]>|null }} */
+const loraCatalog = { loras: [], fetchedAt: 0, error: null, promise: null };
+
+function normalizeLoraSet(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const name = String(raw.name ?? '').trim();
+    if (!name) return null;
+    const triggers = Array.isArray(raw.triggers)
+        ? raw.triggers.map(t => String(t).trim()).filter(Boolean)
+        : String(raw.triggers ?? '').split(',').map(t => t.trim()).filter(Boolean);
+    return {
+        name,
+        triggers,
+        hint: String(raw.hint ?? '').trim(),
+        strength: clampFloat(raw.strength, 0, 2, 1.0),
+        group: String(raw.group ?? '').trim(),
+    };
+}
+
+/**
+ * Loads the catalogue once per page load; `force` re-fetches (settings opened / refresh button).
+ * Never throws: on failure the previous catalogue (or an empty one) is kept and `loraCatalog.error` is set.
+ * @returns {Promise<LoraSet[]>}
+ */
+async function fetchLoraCatalog({ force = false } = {}) {
+    if (!force && loraCatalog.fetchedAt) return loraCatalog.loras;
+    if (loraCatalog.promise) return loraCatalog.promise;
+    loraCatalog.promise = (async () => {
+        try {
+            const json = await bridgeFetchJson('/video/loras', { method: 'GET' });
+            const list = Array.isArray(json?.loras) ? json.loras : [];
+            loraCatalog.loras = list.map(normalizeLoraSet).filter(Boolean);
+            loraCatalog.fetchedAt = Date.now();
+            loraCatalog.error = null;
+            console.info(LOG, `LoRA catalogue: ${loraCatalog.loras.length} set(s)`);
+        } catch (error) {
+            loraCatalog.error = String(error?.message || error);
+            console.warn(LOG, 'LoRA catalogue fetch failed', error);
+        } finally {
+            loraCatalog.promise = null;
+        }
+        return loraCatalog.loras;
+    })();
+    return loraCatalog.promise;
+}
+
+async function refreshLoraCatalog({ force = false, notify = false } = {}) {
+    const el = document.getElementById('tv_lora_catalog');
+    if (el && (force || !loraCatalog.fetchedAt)) el.textContent = 'загружаю каталог…';
+    await fetchLoraCatalog({ force });
+    renderLoraCatalog();
+    if (notify) {
+        if (loraCatalog.error) toastr.error(`Каталог LoRA: ${loraCatalog.error}`, TOAST_TITLE);
+        else toastr.info(`Каталог LoRA: ${loraCatalog.loras.length} сет(ов)`, TOAST_TITLE);
+    }
+}
+
+function renderLoraCatalog() {
+    const el = document.getElementById('tv_lora_catalog');
+    if (!el) return;
+    el.innerHTML = '';
+    if (loraCatalog.error && !loraCatalog.loras.length) {
+        el.textContent = `не удалось загрузить: ${loraCatalog.error}`;
+        return;
+    }
+    if (!loraCatalog.fetchedAt) {
+        el.textContent = 'каталог ещё не загружен';
+        return;
+    }
+    if (!loraCatalog.loras.length) {
+        el.textContent = 'бридж не вернул ни одного LoRA-сета';
+        return;
+    }
+    for (const set of loraCatalog.loras) {
+        const row = document.createElement('div');
+        row.className = 'tv-catalog-row';
+        const meta = [set.group, set.triggers.length ? `триггеры: ${set.triggers.join(', ')}` : '', `сила ${formatStrength(set.strength)}`].filter(Boolean).join(' · ');
+        row.innerHTML = `<b>${escapeHtml(set.name)}</b> <span>${escapeHtml(meta)}</span>${set.hint ? `<div class="tv-catalog-hint">${escapeHtml(set.hint)}</div>` : ''}`;
+        el.appendChild(row);
+    }
+    if (loraCatalog.error) {
+        const warn = document.createElement('div');
+        warn.textContent = `(последнее обновление не удалось: ${loraCatalog.error})`;
+        el.appendChild(warn);
+    }
+}
+
+/** Text block appended to the system prompt. */
+function loraCatalogPromptBlock() {
+    if (!loraCatalog.loras.length) {
+        return 'Available LoRA sets: none (answer "lora": []).';
+    }
+    const lines = loraCatalog.loras.map(set => {
+        const triggers = set.triggers.length ? set.triggers.join(', ') : '(no trigger words)';
+        return `- ${set.name} — ${triggers} — ${set.hint || '(no hint)'}`;
+    });
+    return ['Available LoRA sets:', ...lines].join('\n');
+}
+
+/**
+ * Accepts "name", "a, b", ["a", "b"], "none"; returns catalogue sets that exist (unknown names ignored).
+ * @returns {LoraSet[]}
+ */
+function resolveLoraNames(value) {
+    let names = [];
+    if (Array.isArray(value)) names = value.map(v => String(v ?? ''));
+    else if (typeof value === 'string') names = value.split(/[,;\n]+/);
+    else if (value && typeof value === 'object' && typeof value.name === 'string') names = [value.name];
+    const wanted = names.map(n => n.trim().toLowerCase()).filter(n => n && n !== 'none');
+    const result = [];
+    for (const name of wanted) {
+        const set = loraCatalog.loras.find(s => s.name.toLowerCase() === name);
+        if (set && !result.includes(set)) result.push(set);
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,15 +527,23 @@ function getProfile(profileId) {
     return profiles.find(p => p.id === profileId) ?? null;
 }
 
-function buildMessages({ base64, mime, instruction, text }) {
+function buildMessages({ base64, mime, instruction, text, continueFrom = null }) {
     const settings = getSettings();
-    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, 'the man and the woman');
-    const userText = [
+    const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, 'the man and the woman')
+        + '\n\n' + loraCatalogPromptBlock();
+    const lines = [];
+    if (continueFrom !== null) {
+        lines.push('Continue the motion from this frame, it is the last frame of the previous clip.');
+        if (continueFrom) lines.push(`Previous clip prompt: ${continueFrom}`);
+        lines.push('');
+    }
+    lines.push(
         `Image-model tags (reference only): ${instruction || '(none)'}`,
         '',
         'Scene text:',
         text || '(empty)',
-    ].join('\n');
+    );
+    const userText = lines.join('\n');
     return [
         { role: 'system', content: systemPrompt },
         {
@@ -448,8 +617,10 @@ function isChatCompletionProfile(profile) {
     }
 }
 
+/**
+ * @returns {{ loras: LoraSet[], prompt: string }}
+ */
 function parseModelJson(raw) {
-    const settings = getSettings();
     let text = String(raw ?? '').trim();
     text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     const start = text.indexOf('{');
@@ -457,15 +628,15 @@ function parseModelJson(raw) {
     if (start !== -1 && end > start) {
         try {
             const obj = JSON.parse(text.slice(start, end + 1));
-            const lora = LORAS.includes(String(obj.lora || '').toLowerCase()) ? String(obj.lora).toLowerCase() : settings.lora;
+            const loras = resolveLoraNames(obj.lora ?? obj.loras);
             const prompt = String(obj.prompt ?? '').trim();
-            if (prompt) return { lora, prompt };
+            if (prompt) return { loras, prompt };
         } catch (error) {
             console.warn(LOG, 'model JSON parse failed', error, text);
         }
     }
     if (!text) throw new Error('модель вернула пустой ответ');
-    return { lora: settings.lora, prompt: text };
+    return { loras: [], prompt: text };
 }
 
 async function askVisionModel(payload) {
@@ -508,41 +679,85 @@ function escapeHtml(text) {
         .replace(/"/g, '&quot;');
 }
 
-async function showJobPopup({ prompt, lora, previewSrc }) {
+/** 1 → "1.0", 0.85 → "0.85" (what the bridge expects in "set:strength"). */
+function formatStrength(value) {
+    const rounded = Math.round(Number(value) * 100) / 100;
+    return Number.isInteger(rounded) ? rounded.toFixed(1) : String(rounded);
+}
+
+function renderLoraChecklist(selected) {
+    if (!loraCatalog.loras.length) {
+        const reason = loraCatalog.error ? `каталог LoRA недоступен (${escapeHtml(loraCatalog.error)})` : 'бридж не вернул ни одного LoRA-сета';
+        return `<div class="tv-lora-empty tv-hint">${reason}</div>`;
+    }
+    return loraCatalog.loras.map((set, index) => {
+        const checked = selected.some(s => s.name === set.name) ? ' checked' : '';
+        const triggers = set.triggers.length ? set.triggers.join(', ') : '—';
+        const group = set.group ? ` <span class="tv-lora-group">${escapeHtml(set.group)}</span>` : '';
+        return `
+        <div class="tv-lora-row" title="${escapeHtml(set.hint)}">
+            <label class="tv-lora-pick">
+                <input type="checkbox" class="tv-lora-check" data-index="${index}" value="${escapeHtml(set.name)}"${checked}>
+                <b>${escapeHtml(set.name)}</b>${group}
+                <span class="tv-lora-triggers">${escapeHtml(triggers)}</span>
+            </label>
+            <input type="number" class="text_pole tv-lora-strength" data-index="${index}" min="0" max="2" step="0.05" value="${escapeHtml(formatStrength(set.strength))}" title="Сила">
+        </div>`;
+    }).join('');
+}
+
+async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Видео' }) {
     const settings = getSettings();
-    const loraOptions = LORAS.map(v => `<option value="${v}"${v === lora ? ' selected' : ''}>${v}</option>`).join('');
     const resOptions = RESOLUTIONS.map(v => `<option value="${v}"${v === Number(settings.res) ? ' selected' : ''}>${v}</option>`).join('');
+    const qualityLabels = { fast: 'быстро', hi: 'лучше' };
+    const qualityOptions = QUALITIES.map(v => `<option value="${v}"${v === settings.quality ? ' selected' : ''}>${qualityLabels[v]}</option>`).join('');
     const deliverLabels = { chat: 'чат', tg: 'телеграм', both: 'оба' };
     const deliverRadios = DELIVER.map(v => `<label><input type="radio" name="tv_p_deliver" value="${v}"${v === settings.deliver ? ' checked' : ''}> ${deliverLabels[v]}</label>`).join('');
 
     const wrapper = document.createElement('div');
     wrapper.className = 'tv-popup';
     wrapper.innerHTML = `
-        <h3>🎬 Видео</h3>
+        <h3>${escapeHtml(title)}</h3>
         ${previewSrc ? `<div class="tv-preview"><img src="${escapeHtml(previewSrc)}" alt=""></div>` : ''}
         <label for="tv_p_prompt">Промпт</label>
         <textarea id="tv_p_prompt" class="text_pole" rows="7"></textarea>
+        <div class="tv-lora-head"><span>LoRA</span><span class="tv-hint">галочка = сет уходит в рендер, число = сила</span></div>
+        <div class="tv-lora-list">${renderLoraChecklist(loras)}</div>
         <div class="tv-grid">
-            <label>LoRA <select id="tv_p_lora" class="text_pole">${loraOptions}</select></label>
-            <label>Сила <input id="tv_p_strength" class="text_pole" type="number" min="0" max="2" step="0.05" value="${escapeHtml(settings.loraStrength)}"></label>
             <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="10" step="1" value="${escapeHtml(settings.sec)}"></label>
             <label>Разрешение <select id="tv_p_res" class="text_pole">${resOptions}</select></label>
             <label>Seed <input id="tv_p_seed" class="text_pole" type="number" step="1" placeholder="случайный"></label>
+            <label>Качество <select id="tv_p_quality" class="text_pole">${qualityOptions}</select></label>
+            <label>Роликов <input id="tv_p_count" class="text_pole" type="number" min="1" max="${MAX_COUNT}" step="1" value="${escapeHtml(settings.count)}"></label>
         </div>
-        <div class="tv-radios"><span>Куда:</span>${deliverRadios}</div>`;
+        <label class="tv-field"><span>Негатив (дополнительно)</span><input id="tv_p_neg" class="text_pole" type="text" placeholder="что не должно появиться" value="${escapeHtml(settings.negExtra)}"></label>
+        <div class="tv-radios">
+            <label><input type="checkbox" id="tv_p_smooth"${settings.smooth ? ' checked' : ''}> 32 fps</label>
+            <span class="tv-radios-sep"></span>
+            <span>Куда:</span>${deliverRadios}
+        </div>`;
     wrapper.querySelector('#tv_p_prompt').value = prompt;
 
     let captured = null;
     const capture = () => {
         const seedRaw = String(wrapper.querySelector('#tv_p_seed').value || '').trim();
-        const loraValue = String(wrapper.querySelector('#tv_p_lora').value || 'none');
+        const pickedLoras = [];
+        for (const check of wrapper.querySelectorAll('.tv-lora-check:checked')) {
+            const set = loraCatalog.loras[Number(check.dataset.index)];
+            if (!set) continue;
+            const strengthInput = wrapper.querySelector(`.tv-lora-strength[data-index="${check.dataset.index}"]`);
+            pickedLoras.push({ name: set.name, strength: clampFloat(strengthInput?.value, 0, 2, set.strength) });
+        }
         captured = {
             prompt: String(wrapper.querySelector('#tv_p_prompt').value || '').trim(),
-            lora: LORAS.includes(loraValue) ? loraValue : 'none',
-            loraStrength: clampFloat(wrapper.querySelector('#tv_p_strength').value, 0, 2, settings.loraStrength),
+            loras: pickedLoras,
             sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 10, settings.sec),
             res: clampInt(wrapper.querySelector('#tv_p_res').value, 1, 4096, settings.res),
             seed: seedRaw === '' ? null : clampInt(seedRaw, -2147483648, 4294967295, null),
+            quality: QUALITIES.includes(wrapper.querySelector('#tv_p_quality').value) ? wrapper.querySelector('#tv_p_quality').value : 'fast',
+            smooth: !!wrapper.querySelector('#tv_p_smooth').checked,
+            count: clampInt(wrapper.querySelector('#tv_p_count').value, 1, MAX_COUNT, 1),
+            negExtra: String(wrapper.querySelector('#tv_p_neg').value || '').trim(),
             deliver: wrapper.querySelector('input[name="tv_p_deliver"]:checked')?.value || settings.deliver,
         };
     };
@@ -578,23 +793,29 @@ async function showJobPopup({ prompt, lora, previewSrc }) {
  * @property {string} key
  * @property {string} chatId
  * @property {number} mesId
- * @property {string} src
+ * @property {string} src        Source image src (where the status line lives)
+ * @property {number} n          Display number within the message (1-based)
  * @property {string} deliver
  * @property {string} prompt
- * @property {string} text
+ * @property {string} icon
+ * @property {string} label
  * @property {boolean} error
  * @property {number} errors
  * @property {any} timer
  * @property {boolean} finished
+ * @property {number} until      recent-only: when to drop the entry from the status line
+ * @property {number} position   queue position (queued only)
  */
 
-/** @type {Map<string, JobState>} */
+/** @type {Map<string, JobState>} active (polling) jobs */
 const jobs = new Map();
+/** @type {Map<string, JobState>} finished jobs still shown in the status line */
+const recentJobs = new Map();
 /** @type {Map<string, Array<{mesId:number, path:string, title:string, jobId:string}>>} */
 const pendingAttach = new Map();
 
-function jobKey(chatId, mesId, src) {
-    return `${chatId}::${mesId}::${src}`;
+function jobKey(chatId, mesId, jobId) {
+    return `${chatId}::${mesId}::${jobId}`;
 }
 
 function currentChatId() {
@@ -606,8 +827,11 @@ function findImageWrap(mesId, src) {
     const mesEl = document.querySelector(`#chat .mes[mesid="${mesId}"]`);
     if (!mesEl) return null;
     const images = mesEl.querySelectorAll('.mes_text img[data-iig-instruction]');
-    const img = Array.from(images).find(i => i.getAttribute('src') === src) ?? null;
-    return img ? getWrap(img) : null;
+    const img = Array.from(images).find(i => i.getAttribute('src') === src)
+        ?? (images.length === 1 ? images[0] : null);
+    if (img) return getWrap(img);
+    // Image gone (message edited) — put the status right under the message text instead.
+    return mesEl.querySelector('.mes_text');
 }
 
 function renderStatus(wrap, text, { error = false } = {}) {
@@ -627,27 +851,56 @@ function renderStatus(wrap, text, { error = false } = {}) {
     el.textContent = text;
 }
 
-function setJobStatus(job, text, { error = false } = {}) {
-    job.text = text;
+/** All jobs (active + recent) that belong to one image of one message, in display order. */
+function jobsForImage(chatId, mesId, src) {
+    const now = Date.now();
+    for (const [key, job] of recentJobs) {
+        if (job.until && job.until <= now) recentJobs.delete(key);
+    }
+    return [...jobs.values(), ...recentJobs.values()]
+        .filter(j => j.chatId === chatId && j.mesId === mesId && j.src === src)
+        .sort((a, b) => a.n - b.n);
+}
+
+/** Builds the one-line status: "⏳ в очереди" or "⏳ #1 в очереди · 🎬 #2 рендерю 0:40". */
+function statusLineFor(chatId, mesId, src) {
+    const list = jobsForImage(chatId, mesId, src);
+    if (!list.length) return { text: '', error: false };
+    // Single clip: "⏳ в очереди #2" (queue position). Several clips: "⏳ #1 в очереди · 🎬 #2 рендерю 0:40" (clip numbers).
+    const text = list.length === 1
+        ? `${list[0].icon} ${list[0].label}${list[0].position ? ` #${list[0].position}` : ''}`.trim()
+        : list.map(j => `${j.icon} #${j.n} ${j.label}`.trim()).join(' · ');
+    return { text, error: list.some(j => j.error) };
+}
+
+function renderStatusFor(chatId, mesId, src) {
+    if (currentChatId() !== chatId) return;
+    const { text, error } = statusLineFor(chatId, mesId, src);
+    renderStatus(findImageWrap(mesId, src), text, { error });
+}
+
+function setJobStatus(job, icon, label, { error = false, position = 0 } = {}) {
+    job.icon = icon;
+    job.label = label;
     job.error = error;
-    if (currentChatId() !== job.chatId) return;
-    renderStatus(findImageWrap(job.mesId, job.src), text, { error });
+    job.position = position;
+    renderStatusFor(job.chatId, job.mesId, job.src);
 }
 
 function statusFromResponse(status) {
     switch (status?.status) {
         case 'queued': {
             const pos = Number(status.position);
-            return Number.isFinite(pos) && pos > 0 ? `⏳ в очереди #${pos}` : '⏳ в очереди';
+            return { icon: '⏳', label: 'в очереди', position: Number.isFinite(pos) && pos > 0 ? pos : 0 };
         }
         case 'rendering':
-            return `🎬 рендерю ${formatElapsed(status.elapsed)}`;
+            return { icon: '🎬', label: `рендерю ${formatElapsed(status.elapsed)}` };
         case 'done':
-            return '✅ готово';
+            return { icon: '✅', label: 'готово' };
         case 'error':
-            return `❌ ${status.error || 'ошибка рендера'}`;
+            return { icon: '❌', label: status.error || 'ошибка рендера' };
         default:
-            return `… ${status?.status || 'неизвестный статус'}`;
+            return { icon: '…', label: status?.status || 'неизвестный статус' };
     }
 }
 
@@ -656,11 +909,62 @@ function getMessage(mesId) {
     return Array.isArray(chat) ? chat[mesId] : undefined;
 }
 
-async function persistJobState(mesId, patch) {
+/**
+ * Per-message state stored in `message.extra.tavern_video`:
+ * { jobs: {id: {n, status, deliver, prompt, src, seed, quality, smooth, start_job, video, error, updated}},
+ *   chain: [done job ids in completion order], job_id, status, src }
+ * `job_id`/`status` mirror the most recently created job (also the v1 format, migrated here).
+ */
+function getMessageState(message) {
+    if (!message) return null;
+    if (!message.extra || typeof message.extra !== 'object') message.extra = {};
+    let tv = message.extra[MODULE];
+    if (!tv || typeof tv !== 'object') tv = message.extra[MODULE] = {};
+    if (!tv.jobs || typeof tv.jobs !== 'object') tv.jobs = {};
+    if (!Array.isArray(tv.chain)) tv.chain = [];
+    if (tv.job_id && !tv.jobs[tv.job_id]) {
+        // v1 record → job list
+        tv.jobs[tv.job_id] = {
+            n: Object.keys(tv.jobs).length + 1,
+            status: tv.status || 'queued',
+            deliver: tv.deliver || 'chat',
+            prompt: tv.prompt || '',
+            src: tv.src || '',
+            video: tv.video,
+            error: tv.error,
+            updated: tv.updated || Date.now(),
+        };
+        if (tv.status === 'done' && !tv.chain.includes(tv.job_id)) tv.chain.push(tv.job_id);
+    }
+    return tv;
+}
+
+/** Job ids of finished clips (chain order); the last one is what ⏩ continues from. */
+function doneJobIds(message) {
+    const tv = getMessageState(message);
+    if (!tv) return [];
+    const done = tv.chain.filter(id => tv.jobs[id]?.status === 'done');
+    for (const [id, rec] of Object.entries(tv.jobs)) {
+        if (rec?.status === 'done' && !done.includes(id)) done.push(id);
+    }
+    return done;
+}
+
+function writeJobRecord(message, jobId, patch) {
+    const tv = getMessageState(message);
+    const record = { ...(tv.jobs[jobId] || {}), ...patch, updated: Date.now() };
+    tv.jobs[jobId] = record;
+    tv.job_id = jobId;
+    tv.status = record.status;
+    if (record.src) tv.src = record.src;
+    if (record.status === 'done' && !tv.chain.includes(jobId)) tv.chain.push(jobId);
+    return record;
+}
+
+async function persistJob(mesId, jobId, patch) {
     const message = getMessage(mesId);
     if (!message) return;
-    if (!message.extra || typeof message.extra !== 'object') message.extra = {};
-    message.extra[MODULE] = { ...(message.extra[MODULE] || {}), ...patch, updated: Date.now() };
+    writeJobRecord(message, jobId, patch);
     try {
         await getContext().saveChat();
     } catch (error) {
@@ -668,41 +972,71 @@ async function persistJobState(mesId, patch) {
     }
 }
 
-async function createJob({ base64, mime, params, chatId, mesId }) {
+/**
+ * Seeds for a batch: explicit seed → seed, seed+1, …; empty seed → one random per clip
+ * (null for a single clip lets the bridge pick, distinct client-side seeds for several).
+ */
+function makeSeeds(seed, count) {
+    if (seed !== null && seed !== undefined) {
+        return Array.from({ length: count }, (_, i) => seed + i);
+    }
+    if (count === 1) return [null];
+    const seeds = new Set();
+    while (seeds.size < count) seeds.add(Math.floor(Math.random() * 2147483647));
+    return [...seeds];
+}
+
+/**
+ * POST /video/jobs. Pass either {base64, mime} (start from an image) or {startJob} (continue from that job's last frame).
+ */
+async function createJob({ base64, mime, startJob, params, seed, chatId, mesId }) {
     const body = {
-        image: base64,
-        image_mime: mime,
         prompt: params.prompt,
         sec: params.sec,
         res: params.res,
-        seed: params.seed,
-        lora: params.lora === 'none' ? [] : [`${params.lora}:${Number(params.loraStrength).toFixed(2).replace(/0$/, '')}`],
+        seed,
+        lora: params.loras.map(l => `${l.name}:${formatStrength(l.strength)}`),
+        quality: params.quality,
+        smooth: !!params.smooth,
         deliver: params.deliver,
         chat: chatId,
         message_id: mesId,
     };
+    if (params.negExtra) body.neg_extra = params.negExtra;
+    if (startJob) {
+        body.start_job = startJob;
+    } else {
+        body.image = base64;
+        body.image_mime = mime;
+    }
     const json = await bridgeFetchJson('/video/jobs', { method: 'POST', body: JSON.stringify(body) });
     if (!json?.id) throw new Error('бридж не вернул id задачи');
     return String(json.id);
+}
+
+function makeJobState({ id, chatId, mesId, src, n, deliver, prompt, icon = '⏳', label = 'в очереди' }) {
+    return {
+        id, key: jobKey(chatId, mesId, id), chatId, mesId, src, n, deliver, prompt,
+        icon, label, error: false, errors: 0, timer: null, finished: false, until: 0, position: 0,
+    };
 }
 
 function startPolling(job) {
     if (jobs.has(job.key)) {
         clearTimeout(jobs.get(job.key).timer);
     }
+    recentJobs.delete(job.key);
     job.errors = 0;
     job.finished = false;
     jobs.set(job.key, job);
 
-    const finish = () => {
+    const finish = ({ ttl }) => {
         job.finished = true;
         clearTimeout(job.timer);
         jobs.delete(job.key);
-        setTimeout(() => {
-            if (currentChatId() === job.chatId && !job.error) {
-                renderStatus(findImageWrap(job.mesId, job.src), '');
-            }
-        }, DONE_STATUS_TTL_MS);
+        job.until = Date.now() + ttl;
+        recentJobs.set(job.key, job);
+        setTimeout(() => renderStatusFor(job.chatId, job.mesId, job.src), ttl + 50);
     };
 
     const tick = async () => {
@@ -714,47 +1048,50 @@ function startPolling(job) {
             job.errors += 1;
             console.warn(LOG, `poll failed (${job.errors}/${MAX_POLL_ERRORS})`, error);
             if (job.errors >= MAX_POLL_ERRORS) {
-                setJobStatus(job, `❌ бридж недоступен: ${error.message}`, { error: true });
-                await persistJobState(job.mesId, { status: 'error', error: error.message });
-                finish();
+                setJobStatus(job, '❌', `бридж недоступен: ${error.message}`, { error: true });
+                await persistJob(job.mesId, job.id, { status: 'error', error: error.message });
+                finish({ ttl: ERROR_STATUS_TTL_MS });
                 return;
             }
-            setJobStatus(job, `${job.text || '⏳'} (нет связи, пробую ещё…)`);
+            setJobStatus(job, job.icon, `${job.label} (нет связи, пробую ещё…)`);
             job.timer = setTimeout(tick, POLL_MS);
             return;
         }
 
-        const text = statusFromResponse(status);
+        const { icon, label, position = 0 } = statusFromResponse(status);
         switch (status.status) {
             case 'done': {
-                setJobStatus(job, text);
-                finish();
+                setJobStatus(job, icon, label);
                 if (job.deliver === 'chat' || job.deliver === 'both') {
                     try {
-                        setJobStatus(job, '⬇️ загружаю видео в чат…');
+                        setJobStatus(job, '⬇️', 'загружаю видео в чат…');
                         await deliverToChat(job, status);
-                        setJobStatus(job, '✅ видео готово');
+                        setJobStatus(job, '✅', 'видео готово');
+                        finish({ ttl: DONE_STATUS_TTL_MS });
                         toastr.success('Видео добавлено в сообщение', TOAST_TITLE);
                     } catch (error) {
                         console.error(LOG, 'deliverToChat failed', error);
-                        setJobStatus(job, `❌ не смогла прикрепить видео: ${error.message}`, { error: true });
+                        setJobStatus(job, '❌', `не смогла прикрепить видео: ${error.message}`, { error: true });
+                        finish({ ttl: ERROR_STATUS_TTL_MS });
                         toastr.error(`Не смогла прикрепить видео: ${error.message}`, TOAST_TITLE);
                     }
                 } else {
-                    setJobStatus(job, '✅ готово, отправлено в телеграм');
-                    await persistJobState(job.mesId, { status: 'done' });
+                    setJobStatus(job, '✅', 'готово, отправлено в телеграм');
+                    await persistJob(job.mesId, job.id, { status: 'done' });
+                    finish({ ttl: DONE_STATUS_TTL_MS });
+                    rescan();
                 }
                 return;
             }
             case 'error': {
-                setJobStatus(job, text, { error: true });
+                setJobStatus(job, icon, label, { error: true });
                 toastr.error(status.error || 'ошибка рендера', TOAST_TITLE);
-                await persistJobState(job.mesId, { status: 'error', error: status.error || '' });
-                finish();
+                await persistJob(job.mesId, job.id, { status: 'error', error: status.error || '' });
+                finish({ ttl: ERROR_STATUS_TTL_MS });
                 return;
             }
             default: {
-                setJobStatus(job, text);
+                setJobStatus(job, icon, label, { position });
                 job.timer = setTimeout(tick, POLL_MS);
             }
         }
@@ -827,17 +1164,17 @@ async function attachUploadedVideo(chatId, mesId, path, title, jobId) {
     const message = getMessage(mesId);
     if (!message) throw new Error(`сообщение #${mesId} не найдено`);
     attachVideoToMessage(message, path, title);
-    if (!message.extra[MODULE] || typeof message.extra[MODULE] !== 'object') message.extra[MODULE] = {};
-    Object.assign(message.extra[MODULE], { job_id: jobId, status: 'done', video: path, updated: Date.now() });
+    writeJobRecord(message, jobId, { status: 'done', video: path });
     await getContext().saveChat();
     rerenderMessageMedia(mesId, message);
+    rescan();
     return true;
 }
 
 async function deliverToChat(job, status) {
     const videoUrl = resolveBridgeFileUrl(status.video_url);
     const base64 = await downloadVideoAsBase64(videoUrl);
-    const name = `slayvideo_${Date.now()}.mp4`;
+    const name = `slayvideo_${Date.now()}_${job.id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12)}.mp4`;
     const path = await uploadToSillyTavern(name, base64);
     await attachUploadedVideo(job.chatId, job.mesId, path, job.prompt, job.id);
 }
@@ -862,31 +1199,156 @@ function resumeJobsFromChat() {
     const chatId = currentChatId();
     if (!chatId || !Array.isArray(context.chat)) return;
     context.chat.forEach((message, mesId) => {
-        const saved = message?.extra?.[MODULE];
-        if (!saved?.job_id || ['done', 'error'].includes(saved.status)) return;
-        const key = jobKey(chatId, mesId, saved.src || '');
-        if (jobs.has(key)) return;
-        console.info(LOG, `resuming job ${saved.job_id} for message #${mesId}`);
-        startPolling({
-            id: String(saved.job_id),
-            key,
-            chatId,
-            mesId,
-            src: saved.src || '',
-            deliver: DELIVER.includes(saved.deliver) ? saved.deliver : 'chat',
-            prompt: saved.prompt || '',
-            text: '',
-            error: false,
-            errors: 0,
-            timer: null,
-            finished: false,
-        });
+        if (!message?.extra?.[MODULE]) return;
+        const tv = getMessageState(message);
+        for (const [jobId, record] of Object.entries(tv.jobs)) {
+            if (!record || ['done', 'error'].includes(record.status)) continue;
+            const key = jobKey(chatId, mesId, jobId);
+            if (jobs.has(key)) continue;
+            console.info(LOG, `resuming job ${jobId} for message #${mesId}`);
+            startPolling(makeJobState({
+                id: jobId,
+                chatId,
+                mesId,
+                src: record.src || tv.src || '',
+                n: Number(record.n) || Object.keys(tv.jobs).indexOf(jobId) + 1,
+                deliver: DELIVER.includes(record.deliver) ? record.deliver : 'chat',
+                prompt: record.prompt || '',
+                icon: '⏳',
+                label: 'проверяю статус…',
+            }));
+        }
     });
 }
 
 // ---------------------------------------------------------------------------
 // Click flow
 // ---------------------------------------------------------------------------
+
+/**
+ * Creates `params.count` jobs for one message/image and starts polling each.
+ * @param {object} source {base64, mime} or {startJob}
+ */
+async function launchJobs({ source, params, chatId, mesId, src, wrap }) {
+    const message = getMessage(mesId);
+    if (!message) throw new Error(`сообщение #${mesId} не найдено`);
+    const tv = getMessageState(message);
+    const seeds = makeSeeds(params.seed, params.count);
+    const created = [];
+    let firstError = null;
+    for (let i = 0; i < params.count; i++) {
+        renderStatus(wrap, params.count > 1 ? `📤 отправляю задачу ${i + 1}/${params.count}…` : '📤 отправляю задачу…');
+        try {
+            const jobId = await createJob({ ...source, params, seed: seeds[i], chatId, mesId });
+            const n = Object.keys(tv.jobs).length + 1;
+            writeJobRecord(message, jobId, {
+                n,
+                status: 'queued',
+                deliver: params.deliver,
+                prompt: params.prompt,
+                src,
+                seed: seeds[i],
+                quality: params.quality,
+                smooth: !!params.smooth,
+                start_job: source.startJob || undefined,
+            });
+            created.push(makeJobState({ id: jobId, chatId, mesId, src, n, deliver: params.deliver, prompt: params.prompt }));
+        } catch (error) {
+            firstError = firstError || error;
+            console.error(LOG, `job ${i + 1}/${params.count} failed`, error);
+        }
+    }
+    if (created.length) {
+        try {
+            await getContext().saveChat();
+        } catch (error) {
+            console.warn(LOG, 'saveChat failed', error);
+        }
+    }
+    for (const job of created) startPolling(job);
+    renderStatusFor(chatId, mesId, src);
+    if (firstError) {
+        const msg = created.length
+            ? `часть задач не создана (${created.length}/${params.count} ушло): ${firstError.message}`
+            : firstError.message;
+        toastr.error(msg, TOAST_TITLE);
+        if (!created.length) throw firstError;
+    }
+}
+
+/** GET /video/jobs/<id>/last → PNG of the last frame of a finished job. */
+async function fetchLastFrame(jobId) {
+    const response = await fetch(bridgeUrl(`/video/jobs/${encodeURIComponent(jobId)}/last`), { headers: bridgeHeaders() });
+    if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`бридж не отдал последний кадр (HTTP ${response.status})${text ? `: ${text.slice(0, 120)}` : ''}`);
+    }
+    const blob = await response.blob();
+    const mime = (blob.type || '').split(';')[0].trim().toLowerCase() || 'image/png';
+    if (!mime.startsWith('image/')) throw new Error(`последний кадр пришёл как ${mime}, а не картинка`);
+    if (!blob.size) throw new Error('последний кадр пустой');
+    const dataUrl = await blobToDataUrl(blob);
+    return { base64: dataUrl.split(',')[1], mime, dataUrl };
+}
+
+/**
+ * ⏩ Продолжить: last frame of `fromJobId` → vision model → popup → POST start_job.
+ * @param {object} opts
+ * @param {number} opts.mesId
+ * @param {string} opts.fromJobId
+ * @param {HTMLElement} opts.btn
+ * @param {HTMLImageElement|null} [opts.img]  source SLAY image (for the instruction / status anchor)
+ */
+async function onContinueClick({ mesId, fromJobId, btn, img = null }) {
+    const settings = getSettings();
+    const chatId = currentChatId();
+    const message = getMessage(mesId);
+    if (!message) {
+        toastr.error(`Сообщение #${mesId} не найдено`, TOAST_TITLE);
+        return;
+    }
+    const tv = getMessageState(message);
+    const record = tv.jobs[fromJobId];
+    if (!record || record.status !== 'done') {
+        toastr.error('Этот ролик ещё не готов — продолжать не с чего', TOAST_TITLE);
+        return;
+    }
+    if (!String(settings.bridgeUrl || '').trim()) {
+        toastr.error('Укажи адрес бриджа в настройках «🎬 Видео»', TOAST_TITLE);
+        return;
+    }
+    if (btn.classList.contains('tv-busy')) return;
+
+    const src = img?.getAttribute('src') || record.src || tv.src || '';
+    const anchor = findImageWrap(mesId, src);
+    btn.classList.add('tv-busy');
+    btn.disabled = true;
+    try {
+        renderStatus(anchor, '🧠 придумываю продолжение…');
+        await fetchLoraCatalog();
+        const frame = await fetchLastFrame(fromJobId);
+        const sourceImg = img ?? Array.from(document.querySelectorAll(`#chat .mes[mesid="${mesId}"] .mes_text img[data-iig-instruction]`))
+            .find(i => i.getAttribute('src') === src) ?? null;
+        const instruction = sourceImg?.getAttribute('data-iig-instruction') || '';
+        const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
+        const answer = await askVisionModel({
+            base64: frame.base64, mime: frame.mime, instruction, text, continueFrom: record.prompt || '',
+        });
+
+        renderStatusFor(chatId, mesId, src);
+        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: frame.dataUrl, title: '⏩ Продолжить' });
+        if (!params) return;
+
+        await launchJobs({ source: { startJob: fromJobId }, params, chatId, mesId, src, wrap: anchor });
+    } catch (error) {
+        console.error(LOG, error);
+        renderStatus(anchor, `❌ ${error?.message || error}`, { error: true });
+        toastr.error(String(error?.message || error), TOAST_TITLE);
+    } finally {
+        btn.classList.remove('tv-busy');
+        btn.disabled = false;
+    }
+}
 
 async function onVideoButtonClick(img, wrap, btn) {
     const settings = getSettings();
@@ -900,49 +1362,28 @@ async function onVideoButtonClick(img, wrap, btn) {
     const chatId = currentChatId();
     const message = context.chat?.[mesId];
     const src = img.getAttribute('src') || '';
-    const key = jobKey(chatId, mesId, src);
 
-    if (jobs.has(key)) {
-        toastr.info('Для этой картинки уже идёт рендер', TOAST_TITLE);
-        return;
-    }
     if (!String(settings.bridgeUrl || '').trim()) {
         toastr.error('Укажи адрес бриджа в настройках «🎬 Видео»', TOAST_TITLE);
         return;
     }
+    if (btn.classList.contains('tv-busy')) return;
 
     btn.classList.add('tv-busy');
     btn.disabled = true;
     try {
         renderStatus(wrap, '🧠 придумываю промпт…');
+        await fetchLoraCatalog();
         const { base64, mime } = await imageToBase64(img);
         const instruction = img.getAttribute('data-iig-instruction') || '';
         const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
         const answer = await askVisionModel({ base64, mime, instruction, text });
 
-        renderStatus(wrap, '');
-        const params = await showJobPopup({ prompt: answer.prompt, lora: answer.lora, previewSrc: img.currentSrc || src });
+        renderStatusFor(chatId, mesId, src);
+        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: img.currentSrc || src });
         if (!params) return;
 
-        renderStatus(wrap, '📤 отправляю задачу…');
-        const jobId = await createJob({ base64, mime, params, chatId, mesId });
-        await persistJobState(mesId, { job_id: jobId, status: 'queued', deliver: params.deliver, prompt: params.prompt, src });
-
-        startPolling({
-            id: jobId,
-            key,
-            chatId,
-            mesId,
-            src,
-            deliver: params.deliver,
-            prompt: params.prompt,
-            text: '⏳ в очереди',
-            error: false,
-            errors: 0,
-            timer: null,
-            finished: false,
-        });
-        renderStatus(wrap, '⏳ в очереди');
+        await launchJobs({ source: { base64, mime }, params, chatId, mesId, src, wrap });
     } catch (error) {
         console.error(LOG, error);
         renderStatus(wrap, `❌ ${error?.message || error}`, { error: true });
@@ -974,26 +1415,104 @@ function attachButton(img) {
         img.parentNode.insertBefore(wrap, img);
         wrap.appendChild(img);
     }
-    if (wrap.querySelector(':scope > .tv-btn')) return;
+    const mesId = Number(img.closest('.mes')?.getAttribute('mesid'));
 
+    if (!wrap.querySelector(':scope > .tv-btn')) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tv-btn';
+        btn.title = 'Сделать видео из этой картинки';
+        btn.setAttribute('aria-label', 'Сделать видео');
+        btn.textContent = '🎬';
+        btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onVideoButtonClick(img, wrap, btn);
+        });
+        wrap.appendChild(btn);
+
+        // Restore the status line of running / recently finished jobs after a re-render.
+        if (Number.isInteger(mesId)) {
+            const { text, error } = statusLineFor(currentChatId(), mesId, src);
+            if (text) renderStatus(wrap, text, { error });
+        }
+    }
+
+    if (Number.isInteger(mesId)) syncContinueButton(img, wrap, mesId);
+}
+
+/** ⏩ next to 🎬 — only when the message has a finished clip to continue from. */
+function syncContinueButton(img, wrap, mesId) {
+    const message = getMessage(mesId);
+    const done = message?.extra?.[MODULE] ? doneJobIds(message) : [];
+    const existing = wrap.querySelector(':scope > .tv-cont-btn');
+    if (!done.length) {
+        existing?.remove();
+        return;
+    }
+    const lastJobId = done[done.length - 1];
+    if (existing) {
+        existing.dataset.jobId = lastJobId;
+        return;
+    }
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'tv-btn';
-    btn.title = 'Сделать видео из этой картинки';
-    btn.setAttribute('aria-label', 'Сделать видео');
-    btn.textContent = '🎬';
+    btn.className = 'tv-cont-btn';
+    btn.dataset.jobId = lastJobId;
+    btn.title = 'Продолжить движение с последнего кадра готового ролика';
+    btn.setAttribute('aria-label', 'Продолжить');
+    btn.textContent = '⏩';
     btn.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        onVideoButtonClick(img, wrap, btn);
+        onContinueClick({ mesId, fromJobId: btn.dataset.jobId, btn, img });
     });
     wrap.appendChild(btn);
+}
 
-    // Restore a running job's status line after a re-render.
-    const mesId = Number(img.closest('.mes')?.getAttribute('mesid'));
-    if (Number.isInteger(mesId)) {
-        const job = jobs.get(jobKey(currentChatId(), mesId, src));
-        if (job?.text) renderStatus(wrap, job.text, { error: job.error });
+/** "⏩ Продолжить" bar under every attached video that came from one of our jobs. */
+function scanVideoBars() {
+    const chat = getContext().chat;
+    if (!Array.isArray(chat)) return;
+    for (const mesEl of document.querySelectorAll('#chat .mes')) {
+        const mesId = Number(mesEl.getAttribute('mesid'));
+        const message = chat[mesId];
+        if (!message?.extra?.[MODULE]) continue;
+        const tv = getMessageState(message);
+        const byVideo = new Map();
+        for (const [jobId, record] of Object.entries(tv.jobs)) {
+            if (record?.status === 'done' && record.video) byVideo.set(record.video, jobId);
+        }
+        if (!byVideo.size) continue;
+        for (const container of mesEl.querySelectorAll('.mes_media_wrapper .mes_video_container')) {
+            const index = Number(container.getAttribute('data-index'));
+            const url = message.extra?.media?.[index]?.url;
+            const jobId = url ? byVideo.get(url) : undefined;
+            const existing = container.querySelector(':scope > .tv-video-bar');
+            if (!jobId) {
+                existing?.remove();
+                continue;
+            }
+            if (existing) {
+                existing.querySelector('.tv-video-cont').dataset.jobId = jobId;
+                continue;
+            }
+            const bar = document.createElement('div');
+            bar.className = 'tv-video-bar';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tv-video-cont menu_button';
+            btn.dataset.jobId = jobId;
+            btn.title = 'Продолжить движение с последнего кадра этого ролика';
+            btn.textContent = '⏩ Продолжить';
+            btn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onContinueClick({ mesId, fromJobId: btn.dataset.jobId, btn });
+            });
+            bar.appendChild(btn);
+            container.appendChild(bar);
+        }
     }
 }
 
@@ -1005,6 +1524,11 @@ function scanChat() {
         } catch (error) {
             console.warn(LOG, 'attachButton failed', error);
         }
+    }
+    try {
+        scanVideoBars();
+    } catch (error) {
+        console.warn(LOG, 'scanVideoBars failed', error);
     }
 }
 
@@ -1022,7 +1546,7 @@ function observeChat() {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
                 const el = /** @type {Element} */ (node);
-                if (el.classList?.contains('tv-btn') || el.classList?.contains('tv-status')) continue;
+                if (el.classList?.contains('tv-btn') || el.classList?.contains('tv-cont-btn') || el.classList?.contains('tv-status') || el.classList?.contains('tv-video-bar')) continue;
                 rescan();
                 return;
             }
@@ -1067,5 +1591,6 @@ jQuery(async () => {
 
     scanChat();
     resumeJobsFromChat();
+    refreshLoraCatalog();
     console.info(LOG, 'loaded');
 });

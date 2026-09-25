@@ -8,12 +8,17 @@ without a GPU or a real model.
     python3 mock/server.py --port 8787 --key test-key
 
 Endpoints (prefix is empty by default, see --prefix):
+    GET  {prefix}/video/loras           LoRA catalogue        -> {"loras": [{"name","triggers","hint","strength","group"}]}
     POST {prefix}/video/jobs            create a job          -> {"id": "..."}
-    GET  {prefix}/video/jobs/{id}       job status            -> {"status": ..., "position": n, "elapsed": s, "error": "...", "video_url": "..."}
+         body: image (base64) | start_job, prompt, sec, res, seed, lora ["set:strength", ...],
+               quality "fast"|"hi", smooth bool, neg_extra str, deliver chat|tg|both, chat, message_id
+    GET  {prefix}/video/jobs/{id}       job status            -> {"status": ..., "position": n, "elapsed": s, "error": "...", "video_url": "...",
+                                                                  "quality": ..., "smooth": ..., "start_job": ...}
     GET  {prefix}/video/jobs/{id}/file  the rendered mp4
+    GET  {prefix}/video/jobs/{id}/last  PNG of the last frame of a finished job (96x64 here)
     POST {prefix}/v1/chat/completions   fake vision model (OpenAI chat format, returns JSON {"lora","prompt"})
     GET  {prefix}/v1/models             model list for the fake vision model
-    GET  {prefix}/health                {"ok": true}
+    GET  {prefix}/  or /health          {"ok": true, "comfy": "mock"}  (settings «Тест» button)
 
 The fake render takes --queue-seconds in the queue and --render-seconds rendering,
 then returns a tiny embedded mp4 (or the file given with --video).
@@ -23,7 +28,9 @@ A prompt containing "[fail]" (or starting the mock with --fail) ends the job wit
 import argparse
 import base64
 import json
+import struct
 import sys
+import zlib
 import threading
 import time
 import uuid
@@ -104,6 +111,15 @@ C26Y5jmiPuZiVCmENbyhi4ZgABABQQ+mHjLBauaWh5/iAlQQajwqbgAkkiixdwv+4GEtNgUYswBdgxUk
 
 ARGS = None
 VIDEO_BYTES = b""
+
+# The LoRA catalogue the real bridge serves from its ComfyUI folder.
+LORA_CATALOG = [
+    {"name": "nsfw", "triggers": [], "hint": "nudity / sensual scenes, no explicit acts", "strength": 1.0, "group": "body"},
+    {"name": "dreamlay", "triggers": ["bl0wj0b", "d0ubl3_bj", "d0gg1e", "c0wg1rl", "r3v3rs3_c0wg1rl", "m15510n4ry"],
+     "hint": "explicit sex acts; start the prompt with one trigger word", "strength": 0.9, "group": "explicit"},
+    {"name": "slow_pan", "triggers": ["sl0wpan"], "hint": "slow camera pan instead of a static camera", "strength": 0.7, "group": "camera"},
+]
+LORA_NAMES = {entry["name"] for entry in LORA_CATALOG}
 JOBS = {}
 ORDER = []  # job ids in creation order (for queue positions)
 LOCK = threading.Lock()
@@ -143,6 +159,47 @@ def decode_image(value):
     elif data[:3] == b"\xff\xd8\xff":
         mime = "image/jpeg"
     return data, mime
+
+
+def make_png(width, height, rgb):
+    """Solid-colour RGB PNG (stdlib only) — stands in for the last frame of a clip."""
+    row = b"\x00" + bytes(rgb) * width
+    raw = row * height
+
+    def chunk(tag, payload):
+        body = tag + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
+LAST_FRAME_PNG = make_png(96, 64, (180, 60, 200))
+
+
+def parse_lora_list(value):
+    """Validates ["name:strength", ...] against the catalogue. Returns [(name, strength)]."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("lora must be a list of 'name:strength' strings")
+    result = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise ValueError("lora entries must be non-empty strings")
+        name, sep, strength = item.partition(":")
+        if name not in LORA_NAMES:
+            raise ValueError(f"unknown lora set: {name!r} (known: {sorted(LORA_NAMES)})")
+        try:
+            weight = float(strength) if sep else 1.0
+        except ValueError as exc:
+            raise ValueError(f"bad strength in {item!r}") from exc
+        if not 0.0 <= weight <= 2.0:
+            raise ValueError(f"strength out of range in {item!r}")
+        result.append((name, weight))
+    return result
 
 
 def png_size(data):
@@ -202,6 +259,9 @@ def job_public(job):
         "elapsed": round(elapsed, 1),
         "error": job.get("error"),
         "video_url": job.get("video_url"),
+        "quality": job.get("quality"),
+        "smooth": job.get("smooth"),
+        "start_job": job.get("start_job"),
     }
 
 
@@ -229,15 +289,33 @@ def fake_vision_answer(body):
                         image_info = f"image part present but unreadable: {exc}"
         elif isinstance(content, str):
             text_len += len(content)
-    log(f"vision request: model={body.get('model')} messages={len(messages)} system={system_seen} text_chars={text_len} :: {image_info}")
-    answer = {
-        "lora": "nsfw",
-        "prompt": (
-            "Anime style. Seraphina slowly turns toward the viewer and brushes her hair back, "
-            "her dress swaying gently in the breeze while leaves drift past. "
-            f"[mock: {image_info}] camera static, smooth continuous motion"
-        ),
-    }
+    user_text = " ".join(
+        part.get("text", "") for m in messages if isinstance(m, dict) and isinstance(m.get("content"), list)
+        for part in m["content"] if isinstance(part, dict) and part.get("type") == "text"
+    )
+    continuation = "Continue the motion from this frame" in user_text
+    system_text = " ".join(str(m.get("content")) for m in messages if isinstance(m, dict) and m.get("role") == "system")
+    log(f"vision request: model={body.get('model')} messages={len(messages)} system={system_seen} "
+        f"text_chars={text_len} continuation={continuation} :: {image_info}")
+    log(f"  system prompt starts: {system_text[:70]!r}; catalogue block: {'Available LoRA sets:' in system_text}")
+    if continuation:
+        # string form of "lora" — the extension must accept both a string and an array
+        answer = {
+            "lora": "nsfw",
+            "prompt": (
+                "Anime style. Seraphina keeps turning and steps closer, her hair settling on her shoulders "
+                f"as the breeze fades. [mock continuation: {image_info}] camera static, smooth continuous motion"
+            ),
+        }
+    else:
+        answer = {
+            "lora": ["nsfw", "unknown_set"],
+            "prompt": (
+                "Anime style. Seraphina slowly turns toward the viewer and brushes her hair back, "
+                "her dress swaying gently in the breeze while leaves drift past. "
+                f"[mock: {image_info}] camera static, smooth continuous motion"
+            ),
+        }
     return json.dumps(answer, ensure_ascii=False)
 
 
@@ -295,10 +373,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = strip_prefix(urlparse(self.path).path)
-        if path == "/health":
-            return self.send_json(200, {"ok": True, "jobs": len(JOBS)})
+        if path in ("/", "/health"):
+            # the settings panel's «Тест» button expects {ok, comfy}
+            return self.send_json(200, {"ok": True, "comfy": "mock", "jobs": len(JOBS)})
         if path == "/v1/models":
             return self.send_json(200, {"object": "list", "data": [{"id": "mock-vision", "object": "model"}]})
+        if path == "/video/loras":
+            if not self.authorized():
+                return self.send_json(401, {"error": "unauthorized"})
+            return self.send_json(200, {"loras": LORA_CATALOG})
         if path.startswith("/video/jobs/"):
             if not self.authorized():
                 return self.send_json(401, {"error": "unauthorized"})
@@ -313,6 +396,10 @@ class Handler(BaseHTTPRequestHandler):
                 if job["status"] != "done":
                     return self.send_json(409, {"error": "job is not done yet"})
                 return self.send_bytes(200, VIDEO_BYTES, "video/mp4")
+            if len(parts) == 2 and parts[1] == "last":
+                if job["status"] != "done":
+                    return self.send_json(409, {"error": "job is not done yet"})
+                return self.send_bytes(200, LAST_FRAME_PNG, "image/png")
         return self.send_json(404, {"error": f"no route for GET {path}"})
 
     def do_POST(self):
@@ -336,16 +423,41 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/video/jobs":
             if not self.authorized():
                 return self.send_json(401, {"error": "unauthorized"})
-            try:
-                image, mime = decode_image(body.get("image"))
-            except ValueError as exc:
-                return self.send_json(400, {"error": str(exc)})
+            start_job = body.get("start_job")
+            image, mime = b"", None
+            if start_job is not None and body.get("image"):
+                return self.send_json(400, {"error": "send either image or start_job, not both"})
+            if start_job is not None:
+                parent = JOBS.get(str(start_job))
+                if not parent:
+                    return self.send_json(404, {"error": f"start_job {start_job!r} not found"})
+                if parent["status"] != "done":
+                    return self.send_json(409, {"error": f"start_job {start_job!r} is not done yet"})
+                start_job = str(start_job)
+            else:
+                try:
+                    image, mime = decode_image(body.get("image"))
+                except ValueError as exc:
+                    return self.send_json(400, {"error": str(exc)})
             prompt = str(body.get("prompt") or "").strip()
             if not prompt:
                 return self.send_json(400, {"error": "prompt is required"})
             deliver = body.get("deliver") or "chat"
             if deliver not in ("chat", "tg", "both"):
                 return self.send_json(400, {"error": "deliver must be chat|tg|both"})
+            try:
+                loras = parse_lora_list(body.get("lora"))
+            except ValueError as exc:
+                return self.send_json(400, {"error": str(exc)})
+            quality = body.get("quality", "fast")
+            if quality not in ("fast", "hi"):
+                return self.send_json(400, {"error": "quality must be fast|hi"})
+            smooth = body.get("smooth", False)
+            if not isinstance(smooth, bool):
+                return self.send_json(400, {"error": "smooth must be a boolean"})
+            neg_extra = body.get("neg_extra", "")
+            if neg_extra is not None and not isinstance(neg_extra, str):
+                return self.send_json(400, {"error": "neg_extra must be a string"})
             job_id = uuid.uuid4().hex[:12]
             job = {
                 "id": job_id,
@@ -356,16 +468,21 @@ class Handler(BaseHTTPRequestHandler):
                 "error": None,
                 "video_url": None,
                 "deliver": deliver,
+                "quality": quality,
+                "smooth": smooth,
+                "neg_extra": neg_extra or "",
+                "start_job": start_job,
                 "request": {k: v for k, v in body.items() if k != "image"},
             }
             with LOCK:
                 JOBS[job_id] = job
                 ORDER.append(job_id)
-            size = png_size(image)
+            size = png_size(image) if image else None
+            source = f"start_job={start_job} (last frame of that clip)" if start_job else f"image={mime} {len(image)} bytes" + (f" {size[0]}x{size[1]}" if size else "")
             log(
-                f"job {job_id}: created image={mime} {len(image)} bytes"
-                + (f" {size[0]}x{size[1]}" if size else "")
-                + f" sec={body.get('sec')} res={body.get('res')} seed={body.get('seed')} lora={body.get('lora')}"
+                f"job {job_id}: created {source}"
+                + f" sec={body.get('sec')} res={body.get('res')} seed={body.get('seed')} lora={loras}"
+                + f" quality={quality} smooth={smooth} neg_extra={neg_extra!r}"
                 + f" deliver={deliver} chat={body.get('chat')!r} message_id={body.get('message_id')}"
             )
             log(f"job {job_id}: prompt: {prompt}")
