@@ -286,32 +286,88 @@
     padding: 4px 0;
 }
 
-/* Settings drawer */
-.tavern-video-settings .inline-drawer-content > label,
-.tavern-video-settings .tv-field > label {
-    margin-top: 6px;
+/* Settings drawer — same manner as SLAY Images: sections with a header, rows "label | field" */
+.tavern-video-settings .tv-section {
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    padding: 14px;
+    margin: 10px 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
-.tavern-video-settings .tv-row {
+.tavern-video-settings .tv-section h4 {
+    margin: -14px -14px 12px -14px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    font-size: 0.95em;
     display: flex;
+    align-items: center;
     gap: 8px;
 }
 
-.tavern-video-settings .tv-row > div {
-    flex: 1;
+.tavern-video-settings .tv-section h4 .tv-reset {
+    margin-left: auto;
+    padding: 2px 10px;
+    font-size: 0.85em;
+    font-weight: normal;
+}
+
+.tavern-video-settings .tv-row {
+    display: grid;
+    grid-template-columns: minmax(80px, 170px) 1fr auto;
+    align-items: center;
+    column-gap: 10px;
+    margin: 8px 0;
+}
+
+.tavern-video-settings .tv-row > label {
+    font-size: 0.9em;
+    font-weight: 500;
     min-width: 0;
+}
+
+.tavern-video-settings .tv-row > .text_pole {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+.tavern-video-settings .tv-key-toggle {
+    padding: 5px 10px;
+    cursor: pointer;
+}
+
+.tavern-video-settings .tv-hint {
+    font-size: 0.8em;
+    opacity: 0.7;
+    margin: 2px 0 8px;
+}
+
+.tavern-video-settings .tv-check {
+    margin: 8px 0;
+}
+
+.tavern-video-settings .tv-test {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 16px;
+    margin-top: 8px;
+}
+
+.tavern-video-settings .tv-test.testing {
+    opacity: 0.6;
+    pointer-events: none;
 }
 
 .tavern-video-settings textarea {
     width: 100%;
     min-height: 8em;
     resize: vertical;
-}
-
-.tavern-video-settings .tv-hint {
-    font-size: 0.8em;
-    opacity: 0.7;
-    margin-top: 2px;
+    margin: 0;
 }
 
 .tavern-video-settings .tv-catalog {

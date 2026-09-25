@@ -18,7 +18,7 @@ Endpoints (prefix is empty by default, see --prefix):
     GET  {prefix}/video/jobs/{id}/last  PNG of the last frame of a finished job (96x64 here)
     POST {prefix}/v1/chat/completions   fake vision model (OpenAI chat format, returns JSON {"lora","prompt"})
     GET  {prefix}/v1/models             model list for the fake vision model
-    GET  {prefix}/health                {"ok": true}
+    GET  {prefix}/  or /health          {"ok": true, "comfy": "mock"}  (settings «Тест» button)
 
 The fake render takes --queue-seconds in the queue and --render-seconds rendering,
 then returns a tiny embedded mp4 (or the file given with --video).
@@ -371,8 +371,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = strip_prefix(urlparse(self.path).path)
-        if path == "/health":
-            return self.send_json(200, {"ok": True, "jobs": len(JOBS)})
+        if path in ("/", "/health"):
+            # the settings panel's «Тест» button expects {ok, comfy}
+            return self.send_json(200, {"ok": True, "comfy": "mock", "jobs": len(JOBS)})
         if path == "/v1/models":
             return self.send_json(200, {"object": "list", "data": [{"id": "mock-vision", "object": "model"}]})
         if path == "/video/loras":
