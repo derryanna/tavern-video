@@ -10,7 +10,10 @@ without a GPU or a real model.
 Endpoints (prefix is empty by default, see --prefix):
     GET  {prefix}/video/loras           LoRA catalogue        -> {"loras": [{"name","triggers","hint","strength","group"}]}
     POST {prefix}/video/jobs            create a job          -> {"id": "..."}
-    GET  {prefix}/video/jobs/{id}       job status            -> {"status": ..., "position": n, "elapsed": s, "error": "...", "video_url": "..."}
+         body: image (base64) | start_job, prompt, sec, res, seed, lora ["set:strength", ...],
+               quality "fast"|"hi", smooth bool, neg_extra str, deliver chat|tg|both, chat, message_id
+    GET  {prefix}/video/jobs/{id}       job status            -> {"status": ..., "position": n, "elapsed": s, "error": "...", "video_url": "...",
+                                                                  "quality": ..., "smooth": ..., "start_job": ...}
     GET  {prefix}/video/jobs/{id}/file  the rendered mp4
     POST {prefix}/v1/chat/completions   fake vision model (OpenAI chat format, returns JSON {"lora","prompt"})
     GET  {prefix}/v1/models             model list for the fake vision model
@@ -235,6 +238,9 @@ def job_public(job):
         "elapsed": round(elapsed, 1),
         "error": job.get("error"),
         "video_url": job.get("video_url"),
+        "quality": job.get("quality"),
+        "smooth": job.get("smooth"),
+        "start_job": job.get("start_job"),
     }
 
 
@@ -387,6 +393,15 @@ class Handler(BaseHTTPRequestHandler):
                 loras = parse_lora_list(body.get("lora"))
             except ValueError as exc:
                 return self.send_json(400, {"error": str(exc)})
+            quality = body.get("quality", "fast")
+            if quality not in ("fast", "hi"):
+                return self.send_json(400, {"error": "quality must be fast|hi"})
+            smooth = body.get("smooth", False)
+            if not isinstance(smooth, bool):
+                return self.send_json(400, {"error": "smooth must be a boolean"})
+            neg_extra = body.get("neg_extra", "")
+            if neg_extra is not None and not isinstance(neg_extra, str):
+                return self.send_json(400, {"error": "neg_extra must be a string"})
             job_id = uuid.uuid4().hex[:12]
             job = {
                 "id": job_id,
@@ -397,6 +412,10 @@ class Handler(BaseHTTPRequestHandler):
                 "error": None,
                 "video_url": None,
                 "deliver": deliver,
+                "quality": quality,
+                "smooth": smooth,
+                "neg_extra": neg_extra or "",
+                "start_job": None,
                 "request": {k: v for k, v in body.items() if k != "image"},
             }
             with LOCK:
@@ -407,6 +426,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"job {job_id}: created image={mime} {len(image)} bytes"
                 + (f" {size[0]}x{size[1]}" if size else "")
                 + f" sec={body.get('sec')} res={body.get('res')} seed={body.get('seed')} lora={loras}"
+                + f" quality={quality} smooth={smooth} neg_extra={neg_extra!r}"
                 + f" deliver={deliver} chat={body.get('chat')!r} message_id={body.get('message_id')}"
             )
             log(f"job {job_id}: prompt: {prompt}")

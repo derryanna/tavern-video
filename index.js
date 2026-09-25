@@ -27,6 +27,9 @@ const DONE_STATUS_TTL_MS = 15000;
 
 const DELIVER = ['chat', 'tg', 'both'];
 const RESOLUTIONS = [480, 720];
+const QUALITIES = ['fast', 'hi'];
+const MAX_COUNT = 3;
+const ERROR_STATUS_TTL_MS = 5 * 60 * 1000;
 
 export const DEFAULT_SYSTEM_PROMPT = 'You write prompts for Wan 2.2 image-to-video (adult anime roleplay, all characters adults, fictional, consenting). Use the frame, the image instruction and the scene text. Output JSON only: {"lora": ["set", ...], "prompt": "..."}. "lora" lists the names of the LoRA sets from the list below that fit the scene (several allowed, [] if none): explicit sex acts need the explicit set, nudity/sensual scenes the nsfw set, everything else none. Prompt rules: if a chosen set has trigger words, start with exactly one trigger word matching the act. Then "Anime style." Then 2–3 literal sentences: who does what to whom, how the motion repeats or continues. End with "camera static, smooth continuous motion". Use these English names for the characters: {NAMES}. No disclaimers.';
 
@@ -40,6 +43,10 @@ const DEFAULTS = Object.freeze({
     direct: false,
     sec: 5,
     res: 480,
+    quality: 'fast',
+    smooth: false,
+    count: 1,
+    negExtra: '',
     deliver: 'chat',
     names: '',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -107,6 +114,27 @@ const SETTINGS_HTML = `
                 </div>
             </div>
 
+            <div class="tv-row">
+                <div>
+                    <label for="tv_quality">Качество</label>
+                    <select id="tv_quality" class="text_pole">
+                        <option value="fast">быстро</option>
+                        <option value="hi">лучше</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="tv_count">Роликов</label>
+                    <input id="tv_count" class="text_pole" type="number" min="1" max="3" step="1">
+                </div>
+            </div>
+            <label class="checkbox_label" for="tv_smooth">
+                <input id="tv_smooth" type="checkbox">
+                <span>32 fps (интерполяция)</span>
+            </label>
+
+            <label for="tv_neg_extra">Негатив (дополнительно)</label>
+            <input id="tv_neg_extra" class="text_pole" type="text" placeholder="что не должно появиться" autocomplete="off">
+
             <label for="tv_deliver">Куда отправлять</label>
             <select id="tv_deliver" class="text_pole">
                 <option value="chat">чат</option>
@@ -170,6 +198,10 @@ function bindSettingsUi() {
     const $direct = $('#tv_direct').prop('checked', !!settings.direct);
     const $sec = $('#tv_sec').val(settings.sec);
     const $res = $('#tv_res').val(String(settings.res));
+    const $quality = $('#tv_quality').val(settings.quality);
+    const $count = $('#tv_count').val(settings.count);
+    const $smooth = $('#tv_smooth').prop('checked', !!settings.smooth);
+    const $negExtra = $('#tv_neg_extra').val(settings.negExtra);
     const $deliver = $('#tv_deliver').val(settings.deliver);
     const $names = $('#tv_names').val(settings.names);
     const $sysprompt = $('#tv_sysprompt').val(settings.systemPrompt);
@@ -183,6 +215,10 @@ function bindSettingsUi() {
     $('#tv_profile').on('change', function () { settings.profileId = String($(this).val() || ''); save(); });
     $sec.on('input', () => { settings.sec = clampInt($sec.val(), 1, 60, DEFAULTS.sec); save(); });
     $res.on('change', () => { settings.res = RESOLUTIONS.includes(Number($res.val())) ? Number($res.val()) : DEFAULTS.res; save(); });
+    $quality.on('change', () => { settings.quality = QUALITIES.includes(String($quality.val())) ? String($quality.val()) : 'fast'; save(); });
+    $count.on('input', () => { settings.count = clampInt($count.val(), 1, MAX_COUNT, 1); save(); });
+    $smooth.on('change', () => { settings.smooth = $smooth.prop('checked'); save(); });
+    $negExtra.on('input', () => { settings.negExtra = String($negExtra.val()).trim(); save(); });
     $deliver.on('change', () => { settings.deliver = DELIVER.includes(String($deliver.val())) ? String($deliver.val()) : 'chat'; save(); });
     $names.on('input', () => { settings.names = String($names.val()).trim(); save(); });
     $sysprompt.on('input', () => { settings.systemPrompt = String($sysprompt.val()); save(); });
@@ -665,6 +701,8 @@ function renderLoraChecklist(selected) {
 async function showJobPopup({ prompt, loras = [], previewSrc }) {
     const settings = getSettings();
     const resOptions = RESOLUTIONS.map(v => `<option value="${v}"${v === Number(settings.res) ? ' selected' : ''}>${v}</option>`).join('');
+    const qualityLabels = { fast: 'быстро', hi: 'лучше' };
+    const qualityOptions = QUALITIES.map(v => `<option value="${v}"${v === settings.quality ? ' selected' : ''}>${qualityLabels[v]}</option>`).join('');
     const deliverLabels = { chat: 'чат', tg: 'телеграм', both: 'оба' };
     const deliverRadios = DELIVER.map(v => `<label><input type="radio" name="tv_p_deliver" value="${v}"${v === settings.deliver ? ' checked' : ''}> ${deliverLabels[v]}</label>`).join('');
 
@@ -681,8 +719,15 @@ async function showJobPopup({ prompt, loras = [], previewSrc }) {
             <label>Секунды <input id="tv_p_sec" class="text_pole" type="number" min="1" max="60" step="1" value="${escapeHtml(settings.sec)}"></label>
             <label>Разрешение <select id="tv_p_res" class="text_pole">${resOptions}</select></label>
             <label>Seed <input id="tv_p_seed" class="text_pole" type="number" step="1" placeholder="случайный"></label>
+            <label>Качество <select id="tv_p_quality" class="text_pole">${qualityOptions}</select></label>
+            <label>Роликов <input id="tv_p_count" class="text_pole" type="number" min="1" max="${MAX_COUNT}" step="1" value="${escapeHtml(settings.count)}"></label>
         </div>
-        <div class="tv-radios"><span>Куда:</span>${deliverRadios}</div>`;
+        <label class="tv-field"><span>Негатив (дополнительно)</span><input id="tv_p_neg" class="text_pole" type="text" placeholder="что не должно появиться" value="${escapeHtml(settings.negExtra)}"></label>
+        <div class="tv-radios">
+            <label><input type="checkbox" id="tv_p_smooth"${settings.smooth ? ' checked' : ''}> 32 fps</label>
+            <span class="tv-radios-sep"></span>
+            <span>Куда:</span>${deliverRadios}
+        </div>`;
     wrapper.querySelector('#tv_p_prompt').value = prompt;
 
     let captured = null;
@@ -701,6 +746,10 @@ async function showJobPopup({ prompt, loras = [], previewSrc }) {
             sec: clampInt(wrapper.querySelector('#tv_p_sec').value, 1, 60, settings.sec),
             res: clampInt(wrapper.querySelector('#tv_p_res').value, 1, 4096, settings.res),
             seed: seedRaw === '' ? null : clampInt(seedRaw, -2147483648, 4294967295, null),
+            quality: QUALITIES.includes(wrapper.querySelector('#tv_p_quality').value) ? wrapper.querySelector('#tv_p_quality').value : 'fast',
+            smooth: !!wrapper.querySelector('#tv_p_smooth').checked,
+            count: clampInt(wrapper.querySelector('#tv_p_count').value, 1, MAX_COUNT, 1),
+            negExtra: String(wrapper.querySelector('#tv_p_neg').value || '').trim(),
             deliver: wrapper.querySelector('input[name="tv_p_deliver"]:checked')?.value || settings.deliver,
         };
     };
@@ -736,23 +785,29 @@ async function showJobPopup({ prompt, loras = [], previewSrc }) {
  * @property {string} key
  * @property {string} chatId
  * @property {number} mesId
- * @property {string} src
+ * @property {string} src        Source image src (where the status line lives)
+ * @property {number} n          Display number within the message (1-based)
  * @property {string} deliver
  * @property {string} prompt
- * @property {string} text
+ * @property {string} icon
+ * @property {string} label
  * @property {boolean} error
  * @property {number} errors
  * @property {any} timer
  * @property {boolean} finished
+ * @property {number} until      recent-only: when to drop the entry from the status line
+ * @property {number} position   queue position (queued only)
  */
 
-/** @type {Map<string, JobState>} */
+/** @type {Map<string, JobState>} active (polling) jobs */
 const jobs = new Map();
+/** @type {Map<string, JobState>} finished jobs still shown in the status line */
+const recentJobs = new Map();
 /** @type {Map<string, Array<{mesId:number, path:string, title:string, jobId:string}>>} */
 const pendingAttach = new Map();
 
-function jobKey(chatId, mesId, src) {
-    return `${chatId}::${mesId}::${src}`;
+function jobKey(chatId, mesId, jobId) {
+    return `${chatId}::${mesId}::${jobId}`;
 }
 
 function currentChatId() {
@@ -764,7 +819,8 @@ function findImageWrap(mesId, src) {
     const mesEl = document.querySelector(`#chat .mes[mesid="${mesId}"]`);
     if (!mesEl) return null;
     const images = mesEl.querySelectorAll('.mes_text img[data-iig-instruction]');
-    const img = Array.from(images).find(i => i.getAttribute('src') === src) ?? null;
+    const img = Array.from(images).find(i => i.getAttribute('src') === src)
+        ?? (images.length === 1 ? images[0] : null);
     return img ? getWrap(img) : null;
 }
 
@@ -785,27 +841,56 @@ function renderStatus(wrap, text, { error = false } = {}) {
     el.textContent = text;
 }
 
-function setJobStatus(job, text, { error = false } = {}) {
-    job.text = text;
+/** All jobs (active + recent) that belong to one image of one message, in display order. */
+function jobsForImage(chatId, mesId, src) {
+    const now = Date.now();
+    for (const [key, job] of recentJobs) {
+        if (job.until && job.until <= now) recentJobs.delete(key);
+    }
+    return [...jobs.values(), ...recentJobs.values()]
+        .filter(j => j.chatId === chatId && j.mesId === mesId && j.src === src)
+        .sort((a, b) => a.n - b.n);
+}
+
+/** Builds the one-line status: "⏳ в очереди" or "⏳ #1 в очереди · 🎬 #2 рендерю 0:40". */
+function statusLineFor(chatId, mesId, src) {
+    const list = jobsForImage(chatId, mesId, src);
+    if (!list.length) return { text: '', error: false };
+    // Single clip: "⏳ в очереди #2" (queue position). Several clips: "⏳ #1 в очереди · 🎬 #2 рендерю 0:40" (clip numbers).
+    const text = list.length === 1
+        ? `${list[0].icon} ${list[0].label}${list[0].position ? ` #${list[0].position}` : ''}`.trim()
+        : list.map(j => `${j.icon} #${j.n} ${j.label}`.trim()).join(' · ');
+    return { text, error: list.some(j => j.error) };
+}
+
+function renderStatusFor(chatId, mesId, src) {
+    if (currentChatId() !== chatId) return;
+    const { text, error } = statusLineFor(chatId, mesId, src);
+    renderStatus(findImageWrap(mesId, src), text, { error });
+}
+
+function setJobStatus(job, icon, label, { error = false, position = 0 } = {}) {
+    job.icon = icon;
+    job.label = label;
     job.error = error;
-    if (currentChatId() !== job.chatId) return;
-    renderStatus(findImageWrap(job.mesId, job.src), text, { error });
+    job.position = position;
+    renderStatusFor(job.chatId, job.mesId, job.src);
 }
 
 function statusFromResponse(status) {
     switch (status?.status) {
         case 'queued': {
             const pos = Number(status.position);
-            return Number.isFinite(pos) && pos > 0 ? `⏳ в очереди #${pos}` : '⏳ в очереди';
+            return { icon: '⏳', label: 'в очереди', position: Number.isFinite(pos) && pos > 0 ? pos : 0 };
         }
         case 'rendering':
-            return `🎬 рендерю ${formatElapsed(status.elapsed)}`;
+            return { icon: '🎬', label: `рендерю ${formatElapsed(status.elapsed)}` };
         case 'done':
-            return '✅ готово';
+            return { icon: '✅', label: 'готово' };
         case 'error':
-            return `❌ ${status.error || 'ошибка рендера'}`;
+            return { icon: '❌', label: status.error || 'ошибка рендера' };
         default:
-            return `… ${status?.status || 'неизвестный статус'}`;
+            return { icon: '…', label: status?.status || 'неизвестный статус' };
     }
 }
 
@@ -814,11 +899,62 @@ function getMessage(mesId) {
     return Array.isArray(chat) ? chat[mesId] : undefined;
 }
 
-async function persistJobState(mesId, patch) {
+/**
+ * Per-message state stored in `message.extra.tavern_video`:
+ * { jobs: {id: {n, status, deliver, prompt, src, seed, quality, smooth, start_job, video, error, updated}},
+ *   chain: [done job ids in completion order], job_id, status, src }
+ * `job_id`/`status` mirror the most recently created job (also the v1 format, migrated here).
+ */
+function getMessageState(message) {
+    if (!message) return null;
+    if (!message.extra || typeof message.extra !== 'object') message.extra = {};
+    let tv = message.extra[MODULE];
+    if (!tv || typeof tv !== 'object') tv = message.extra[MODULE] = {};
+    if (!tv.jobs || typeof tv.jobs !== 'object') tv.jobs = {};
+    if (!Array.isArray(tv.chain)) tv.chain = [];
+    if (tv.job_id && !tv.jobs[tv.job_id]) {
+        // v1 record → job list
+        tv.jobs[tv.job_id] = {
+            n: Object.keys(tv.jobs).length + 1,
+            status: tv.status || 'queued',
+            deliver: tv.deliver || 'chat',
+            prompt: tv.prompt || '',
+            src: tv.src || '',
+            video: tv.video,
+            error: tv.error,
+            updated: tv.updated || Date.now(),
+        };
+        if (tv.status === 'done' && !tv.chain.includes(tv.job_id)) tv.chain.push(tv.job_id);
+    }
+    return tv;
+}
+
+/** Job ids of finished clips (chain order); the last one is what ⏩ continues from. */
+function doneJobIds(message) {
+    const tv = getMessageState(message);
+    if (!tv) return [];
+    const done = tv.chain.filter(id => tv.jobs[id]?.status === 'done');
+    for (const [id, rec] of Object.entries(tv.jobs)) {
+        if (rec?.status === 'done' && !done.includes(id)) done.push(id);
+    }
+    return done;
+}
+
+function writeJobRecord(message, jobId, patch) {
+    const tv = getMessageState(message);
+    const record = { ...(tv.jobs[jobId] || {}), ...patch, updated: Date.now() };
+    tv.jobs[jobId] = record;
+    tv.job_id = jobId;
+    tv.status = record.status;
+    if (record.src) tv.src = record.src;
+    if (record.status === 'done' && !tv.chain.includes(jobId)) tv.chain.push(jobId);
+    return record;
+}
+
+async function persistJob(mesId, jobId, patch) {
     const message = getMessage(mesId);
     if (!message) return;
-    if (!message.extra || typeof message.extra !== 'object') message.extra = {};
-    message.extra[MODULE] = { ...(message.extra[MODULE] || {}), ...patch, updated: Date.now() };
+    writeJobRecord(message, jobId, patch);
     try {
         await getContext().saveChat();
     } catch (error) {
@@ -826,41 +962,71 @@ async function persistJobState(mesId, patch) {
     }
 }
 
-async function createJob({ base64, mime, params, chatId, mesId }) {
+/**
+ * Seeds for a batch: explicit seed → seed, seed+1, …; empty seed → one random per clip
+ * (null for a single clip lets the bridge pick, distinct client-side seeds for several).
+ */
+function makeSeeds(seed, count) {
+    if (seed !== null && seed !== undefined) {
+        return Array.from({ length: count }, (_, i) => seed + i);
+    }
+    if (count === 1) return [null];
+    const seeds = new Set();
+    while (seeds.size < count) seeds.add(Math.floor(Math.random() * 2147483647));
+    return [...seeds];
+}
+
+/**
+ * POST /video/jobs. Pass either {base64, mime} (start from an image) or {startJob} (continue from that job's last frame).
+ */
+async function createJob({ base64, mime, startJob, params, seed, chatId, mesId }) {
     const body = {
-        image: base64,
-        image_mime: mime,
         prompt: params.prompt,
         sec: params.sec,
         res: params.res,
-        seed: params.seed,
+        seed,
         lora: params.loras.map(l => `${l.name}:${formatStrength(l.strength)}`),
+        quality: params.quality,
+        smooth: !!params.smooth,
         deliver: params.deliver,
         chat: chatId,
         message_id: mesId,
     };
+    if (params.negExtra) body.neg_extra = params.negExtra;
+    if (startJob) {
+        body.start_job = startJob;
+    } else {
+        body.image = base64;
+        body.image_mime = mime;
+    }
     const json = await bridgeFetchJson('/video/jobs', { method: 'POST', body: JSON.stringify(body) });
     if (!json?.id) throw new Error('бридж не вернул id задачи');
     return String(json.id);
+}
+
+function makeJobState({ id, chatId, mesId, src, n, deliver, prompt, icon = '⏳', label = 'в очереди' }) {
+    return {
+        id, key: jobKey(chatId, mesId, id), chatId, mesId, src, n, deliver, prompt,
+        icon, label, error: false, errors: 0, timer: null, finished: false, until: 0, position: 0,
+    };
 }
 
 function startPolling(job) {
     if (jobs.has(job.key)) {
         clearTimeout(jobs.get(job.key).timer);
     }
+    recentJobs.delete(job.key);
     job.errors = 0;
     job.finished = false;
     jobs.set(job.key, job);
 
-    const finish = () => {
+    const finish = ({ ttl }) => {
         job.finished = true;
         clearTimeout(job.timer);
         jobs.delete(job.key);
-        setTimeout(() => {
-            if (currentChatId() === job.chatId && !job.error) {
-                renderStatus(findImageWrap(job.mesId, job.src), '');
-            }
-        }, DONE_STATUS_TTL_MS);
+        job.until = Date.now() + ttl;
+        recentJobs.set(job.key, job);
+        setTimeout(() => renderStatusFor(job.chatId, job.mesId, job.src), ttl + 50);
     };
 
     const tick = async () => {
@@ -872,47 +1038,50 @@ function startPolling(job) {
             job.errors += 1;
             console.warn(LOG, `poll failed (${job.errors}/${MAX_POLL_ERRORS})`, error);
             if (job.errors >= MAX_POLL_ERRORS) {
-                setJobStatus(job, `❌ бридж недоступен: ${error.message}`, { error: true });
-                await persistJobState(job.mesId, { status: 'error', error: error.message });
-                finish();
+                setJobStatus(job, '❌', `бридж недоступен: ${error.message}`, { error: true });
+                await persistJob(job.mesId, job.id, { status: 'error', error: error.message });
+                finish({ ttl: ERROR_STATUS_TTL_MS });
                 return;
             }
-            setJobStatus(job, `${job.text || '⏳'} (нет связи, пробую ещё…)`);
+            setJobStatus(job, job.icon, `${job.label} (нет связи, пробую ещё…)`);
             job.timer = setTimeout(tick, POLL_MS);
             return;
         }
 
-        const text = statusFromResponse(status);
+        const { icon, label, position = 0 } = statusFromResponse(status);
         switch (status.status) {
             case 'done': {
-                setJobStatus(job, text);
-                finish();
+                setJobStatus(job, icon, label);
                 if (job.deliver === 'chat' || job.deliver === 'both') {
                     try {
-                        setJobStatus(job, '⬇️ загружаю видео в чат…');
+                        setJobStatus(job, '⬇️', 'загружаю видео в чат…');
                         await deliverToChat(job, status);
-                        setJobStatus(job, '✅ видео готово');
+                        setJobStatus(job, '✅', 'видео готово');
+                        finish({ ttl: DONE_STATUS_TTL_MS });
                         toastr.success('Видео добавлено в сообщение', TOAST_TITLE);
                     } catch (error) {
                         console.error(LOG, 'deliverToChat failed', error);
-                        setJobStatus(job, `❌ не смогла прикрепить видео: ${error.message}`, { error: true });
+                        setJobStatus(job, '❌', `не смогла прикрепить видео: ${error.message}`, { error: true });
+                        finish({ ttl: ERROR_STATUS_TTL_MS });
                         toastr.error(`Не смогла прикрепить видео: ${error.message}`, TOAST_TITLE);
                     }
                 } else {
-                    setJobStatus(job, '✅ готово, отправлено в телеграм');
-                    await persistJobState(job.mesId, { status: 'done' });
+                    setJobStatus(job, '✅', 'готово, отправлено в телеграм');
+                    await persistJob(job.mesId, job.id, { status: 'done' });
+                    finish({ ttl: DONE_STATUS_TTL_MS });
+                    rescan();
                 }
                 return;
             }
             case 'error': {
-                setJobStatus(job, text, { error: true });
+                setJobStatus(job, icon, label, { error: true });
                 toastr.error(status.error || 'ошибка рендера', TOAST_TITLE);
-                await persistJobState(job.mesId, { status: 'error', error: status.error || '' });
-                finish();
+                await persistJob(job.mesId, job.id, { status: 'error', error: status.error || '' });
+                finish({ ttl: ERROR_STATUS_TTL_MS });
                 return;
             }
             default: {
-                setJobStatus(job, text);
+                setJobStatus(job, icon, label, { position });
                 job.timer = setTimeout(tick, POLL_MS);
             }
         }
@@ -985,17 +1154,17 @@ async function attachUploadedVideo(chatId, mesId, path, title, jobId) {
     const message = getMessage(mesId);
     if (!message) throw new Error(`сообщение #${mesId} не найдено`);
     attachVideoToMessage(message, path, title);
-    if (!message.extra[MODULE] || typeof message.extra[MODULE] !== 'object') message.extra[MODULE] = {};
-    Object.assign(message.extra[MODULE], { job_id: jobId, status: 'done', video: path, updated: Date.now() });
+    writeJobRecord(message, jobId, { status: 'done', video: path });
     await getContext().saveChat();
     rerenderMessageMedia(mesId, message);
+    rescan();
     return true;
 }
 
 async function deliverToChat(job, status) {
     const videoUrl = resolveBridgeFileUrl(status.video_url);
     const base64 = await downloadVideoAsBase64(videoUrl);
-    const name = `slayvideo_${Date.now()}.mp4`;
+    const name = `slayvideo_${Date.now()}_${job.id.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12)}.mp4`;
     const path = await uploadToSillyTavern(name, base64);
     await attachUploadedVideo(job.chatId, job.mesId, path, job.prompt, job.id);
 }
@@ -1020,31 +1189,82 @@ function resumeJobsFromChat() {
     const chatId = currentChatId();
     if (!chatId || !Array.isArray(context.chat)) return;
     context.chat.forEach((message, mesId) => {
-        const saved = message?.extra?.[MODULE];
-        if (!saved?.job_id || ['done', 'error'].includes(saved.status)) return;
-        const key = jobKey(chatId, mesId, saved.src || '');
-        if (jobs.has(key)) return;
-        console.info(LOG, `resuming job ${saved.job_id} for message #${mesId}`);
-        startPolling({
-            id: String(saved.job_id),
-            key,
-            chatId,
-            mesId,
-            src: saved.src || '',
-            deliver: DELIVER.includes(saved.deliver) ? saved.deliver : 'chat',
-            prompt: saved.prompt || '',
-            text: '',
-            error: false,
-            errors: 0,
-            timer: null,
-            finished: false,
-        });
+        if (!message?.extra?.[MODULE]) return;
+        const tv = getMessageState(message);
+        for (const [jobId, record] of Object.entries(tv.jobs)) {
+            if (!record || ['done', 'error'].includes(record.status)) continue;
+            const key = jobKey(chatId, mesId, jobId);
+            if (jobs.has(key)) continue;
+            console.info(LOG, `resuming job ${jobId} for message #${mesId}`);
+            startPolling(makeJobState({
+                id: jobId,
+                chatId,
+                mesId,
+                src: record.src || tv.src || '',
+                n: Number(record.n) || Object.keys(tv.jobs).indexOf(jobId) + 1,
+                deliver: DELIVER.includes(record.deliver) ? record.deliver : 'chat',
+                prompt: record.prompt || '',
+                icon: '⏳',
+                label: 'проверяю статус…',
+            }));
+        }
     });
 }
 
 // ---------------------------------------------------------------------------
 // Click flow
 // ---------------------------------------------------------------------------
+
+/**
+ * Creates `params.count` jobs for one message/image and starts polling each.
+ * @param {object} source {base64, mime} or {startJob}
+ */
+async function launchJobs({ source, params, chatId, mesId, src, wrap }) {
+    const message = getMessage(mesId);
+    if (!message) throw new Error(`сообщение #${mesId} не найдено`);
+    const tv = getMessageState(message);
+    const seeds = makeSeeds(params.seed, params.count);
+    const created = [];
+    let firstError = null;
+    for (let i = 0; i < params.count; i++) {
+        renderStatus(wrap, params.count > 1 ? `📤 отправляю задачу ${i + 1}/${params.count}…` : '📤 отправляю задачу…');
+        try {
+            const jobId = await createJob({ ...source, params, seed: seeds[i], chatId, mesId });
+            const n = Object.keys(tv.jobs).length + 1;
+            writeJobRecord(message, jobId, {
+                n,
+                status: 'queued',
+                deliver: params.deliver,
+                prompt: params.prompt,
+                src,
+                seed: seeds[i],
+                quality: params.quality,
+                smooth: !!params.smooth,
+                start_job: source.startJob || undefined,
+            });
+            created.push(makeJobState({ id: jobId, chatId, mesId, src, n, deliver: params.deliver, prompt: params.prompt }));
+        } catch (error) {
+            firstError = firstError || error;
+            console.error(LOG, `job ${i + 1}/${params.count} failed`, error);
+        }
+    }
+    if (created.length) {
+        try {
+            await getContext().saveChat();
+        } catch (error) {
+            console.warn(LOG, 'saveChat failed', error);
+        }
+    }
+    for (const job of created) startPolling(job);
+    renderStatusFor(chatId, mesId, src);
+    if (firstError) {
+        const msg = created.length
+            ? `часть задач не создана (${created.length}/${params.count} ушло): ${firstError.message}`
+            : firstError.message;
+        toastr.error(msg, TOAST_TITLE);
+        if (!created.length) throw firstError;
+    }
+}
 
 async function onVideoButtonClick(img, wrap, btn) {
     const settings = getSettings();
@@ -1058,16 +1278,12 @@ async function onVideoButtonClick(img, wrap, btn) {
     const chatId = currentChatId();
     const message = context.chat?.[mesId];
     const src = img.getAttribute('src') || '';
-    const key = jobKey(chatId, mesId, src);
 
-    if (jobs.has(key)) {
-        toastr.info('Для этой картинки уже идёт рендер', TOAST_TITLE);
-        return;
-    }
     if (!String(settings.bridgeUrl || '').trim()) {
         toastr.error('Укажи адрес бриджа в настройках «🎬 Видео»', TOAST_TITLE);
         return;
     }
+    if (btn.classList.contains('tv-busy')) return;
 
     btn.classList.add('tv-busy');
     btn.disabled = true;
@@ -1079,29 +1295,11 @@ async function onVideoButtonClick(img, wrap, btn) {
         const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
         const answer = await askVisionModel({ base64, mime, instruction, text, name1: context.name1, name2: context.name2 });
 
-        renderStatus(wrap, '');
+        renderStatusFor(chatId, mesId, src);
         const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: img.currentSrc || src });
         if (!params) return;
 
-        renderStatus(wrap, '📤 отправляю задачу…');
-        const jobId = await createJob({ base64, mime, params, chatId, mesId });
-        await persistJobState(mesId, { job_id: jobId, status: 'queued', deliver: params.deliver, prompt: params.prompt, src });
-
-        startPolling({
-            id: jobId,
-            key,
-            chatId,
-            mesId,
-            src,
-            deliver: params.deliver,
-            prompt: params.prompt,
-            text: '⏳ в очереди',
-            error: false,
-            errors: 0,
-            timer: null,
-            finished: false,
-        });
-        renderStatus(wrap, '⏳ в очереди');
+        await launchJobs({ source: { base64, mime }, params, chatId, mesId, src, wrap });
     } catch (error) {
         console.error(LOG, error);
         renderStatus(wrap, `❌ ${error?.message || error}`, { error: true });
@@ -1148,11 +1346,11 @@ function attachButton(img) {
     });
     wrap.appendChild(btn);
 
-    // Restore a running job's status line after a re-render.
+    // Restore the status line of running / recently finished jobs after a re-render.
     const mesId = Number(img.closest('.mes')?.getAttribute('mesid'));
     if (Number.isInteger(mesId)) {
-        const job = jobs.get(jobKey(currentChatId(), mesId, src));
-        if (job?.text) renderStatus(wrap, job.text, { error: job.error });
+        const { text, error } = statusLineFor(currentChatId(), mesId, src);
+        if (text) renderStatus(wrap, text, { error });
     }
 }
 

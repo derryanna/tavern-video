@@ -146,6 +146,18 @@
     cursor: pointer;
 }
 
+.tv-popup .tv-radios-sep {
+    flex: 1;
+}
+
+.tv-popup .tv-field {
+    margin-top: 8px;
+}
+
+.tv-popup .tv-field input {
+    width: 100%;
+}
+
 /* LoRA checklist in the popup */
 .tv-popup .tv-lora-head {
     display: flex;
