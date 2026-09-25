@@ -284,8 +284,10 @@ function effectiveBridgeKey() {
     const own = String(getSettings().bridgeKey || '').trim();
     if (own) return own;
     const slay = extension_settings?.slay_image_gen;
-    const base = String(getSettings().bridgeUrl || DEFAULTS.bridgeUrl).trim().replace(/\/+$/, '');
-    if (slay?.apiKey && base && String(slay.endpoint || '').includes(base)) return String(slay.apiKey).trim();
+    // SLAY stores the endpoint without a leading slash ("comfy-bridge/v1/chat/completions"), compare path-insensitively
+    const norm = (v) => String(v || '').trim().replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+|\/+$/g, '').toLowerCase();
+    const base = norm(getSettings().bridgeUrl || DEFAULTS.bridgeUrl);
+    if (slay?.apiKey && base && norm(slay.endpoint).startsWith(base)) return String(slay.apiKey).trim();
     return '';
 }
 
