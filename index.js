@@ -7,6 +7,7 @@
  * lets the user edit it in a popup and sends the job to a local bridge.
  * When the render is done the video is uploaded to SillyTavern and attached
  * to the message via `message.extra.media` (native ST 1.18 video attachment).
+ * ⏩ continues the motion from the last frame of a finished clip (start_job).
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
@@ -525,17 +526,24 @@ function getProfile(profileId) {
     return profiles.find(p => p.id === profileId) ?? null;
 }
 
-function buildMessages({ base64, mime, instruction, text, name1, name2 }) {
+function buildMessages({ base64, mime, instruction, text, name1, name2, continueFrom = null }) {
     const settings = getSettings();
     const names = String(settings.names || '').trim() || [name2, name1].filter(Boolean).join(', ');
     const systemPrompt = String(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT).replace(/\{NAMES\}/g, names)
         + '\n\n' + loraCatalogPromptBlock();
-    const userText = [
+    const lines = [];
+    if (continueFrom !== null) {
+        lines.push('Continue the motion from this frame, it is the last frame of the previous clip.');
+        if (continueFrom) lines.push(`Previous clip prompt: ${continueFrom}`);
+        lines.push('');
+    }
+    lines.push(
         `Image instruction: ${instruction || '(none)'}`,
         '',
         `Scene text (user: ${name1 || 'User'}; character: ${name2 || 'Character'}):`,
         text || '(empty)',
-    ].join('\n');
+    );
+    const userText = lines.join('\n');
     return [
         { role: 'system', content: systemPrompt },
         {
@@ -698,7 +706,7 @@ function renderLoraChecklist(selected) {
     }).join('');
 }
 
-async function showJobPopup({ prompt, loras = [], previewSrc }) {
+async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Видео' }) {
     const settings = getSettings();
     const resOptions = RESOLUTIONS.map(v => `<option value="${v}"${v === Number(settings.res) ? ' selected' : ''}>${v}</option>`).join('');
     const qualityLabels = { fast: 'быстро', hi: 'лучше' };
@@ -709,7 +717,7 @@ async function showJobPopup({ prompt, loras = [], previewSrc }) {
     const wrapper = document.createElement('div');
     wrapper.className = 'tv-popup';
     wrapper.innerHTML = `
-        <h3>🎬 Видео</h3>
+        <h3>${escapeHtml(title)}</h3>
         ${previewSrc ? `<div class="tv-preview"><img src="${escapeHtml(previewSrc)}" alt=""></div>` : ''}
         <label for="tv_p_prompt">Промпт</label>
         <textarea id="tv_p_prompt" class="text_pole" rows="7"></textarea>
@@ -821,7 +829,9 @@ function findImageWrap(mesId, src) {
     const images = mesEl.querySelectorAll('.mes_text img[data-iig-instruction]');
     const img = Array.from(images).find(i => i.getAttribute('src') === src)
         ?? (images.length === 1 ? images[0] : null);
-    return img ? getWrap(img) : null;
+    if (img) return getWrap(img);
+    // Image gone (message edited) — put the status right under the message text instead.
+    return mesEl.querySelector('.mes_text');
 }
 
 function renderStatus(wrap, text, { error = false } = {}) {
@@ -1266,6 +1276,82 @@ async function launchJobs({ source, params, chatId, mesId, src, wrap }) {
     }
 }
 
+/** GET /video/jobs/<id>/last → PNG of the last frame of a finished job. */
+async function fetchLastFrame(jobId) {
+    const response = await fetch(bridgeUrl(`/video/jobs/${encodeURIComponent(jobId)}/last`), { headers: bridgeHeaders() });
+    if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`бридж не отдал последний кадр (HTTP ${response.status})${text ? `: ${text.slice(0, 120)}` : ''}`);
+    }
+    const blob = await response.blob();
+    const mime = (blob.type || '').split(';')[0].trim().toLowerCase() || 'image/png';
+    if (!mime.startsWith('image/')) throw new Error(`последний кадр пришёл как ${mime}, а не картинка`);
+    if (!blob.size) throw new Error('последний кадр пустой');
+    const dataUrl = await blobToDataUrl(blob);
+    return { base64: dataUrl.split(',')[1], mime, dataUrl };
+}
+
+/**
+ * ⏩ Продолжить: last frame of `fromJobId` → vision model → popup → POST start_job.
+ * @param {object} opts
+ * @param {number} opts.mesId
+ * @param {string} opts.fromJobId
+ * @param {HTMLElement} opts.btn
+ * @param {HTMLImageElement|null} [opts.img]  source SLAY image (for the instruction / status anchor)
+ */
+async function onContinueClick({ mesId, fromJobId, btn, img = null }) {
+    const settings = getSettings();
+    const context = getContext();
+    const chatId = currentChatId();
+    const message = getMessage(mesId);
+    if (!message) {
+        toastr.error(`Сообщение #${mesId} не найдено`, TOAST_TITLE);
+        return;
+    }
+    const tv = getMessageState(message);
+    const record = tv.jobs[fromJobId];
+    if (!record || record.status !== 'done') {
+        toastr.error('Этот ролик ещё не готов — продолжать не с чего', TOAST_TITLE);
+        return;
+    }
+    if (!String(settings.bridgeUrl || '').trim()) {
+        toastr.error('Укажи адрес бриджа в настройках «🎬 Видео»', TOAST_TITLE);
+        return;
+    }
+    if (btn.classList.contains('tv-busy')) return;
+
+    const src = img?.getAttribute('src') || record.src || tv.src || '';
+    const anchor = findImageWrap(mesId, src);
+    btn.classList.add('tv-busy');
+    btn.disabled = true;
+    try {
+        renderStatus(anchor, '🧠 придумываю продолжение…');
+        await fetchLoraCatalog();
+        const frame = await fetchLastFrame(fromJobId);
+        const sourceImg = img ?? Array.from(document.querySelectorAll(`#chat .mes[mesid="${mesId}"] .mes_text img[data-iig-instruction]`))
+            .find(i => i.getAttribute('src') === src) ?? null;
+        const instruction = sourceImg?.getAttribute('data-iig-instruction') || '';
+        const text = stripHtml(message?.mes ?? '').slice(-MAX_TEXT_CHARS);
+        const answer = await askVisionModel({
+            base64: frame.base64, mime: frame.mime, instruction, text,
+            name1: context.name1, name2: context.name2, continueFrom: record.prompt || '',
+        });
+
+        renderStatusFor(chatId, mesId, src);
+        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: frame.dataUrl, title: '⏩ Продолжить' });
+        if (!params) return;
+
+        await launchJobs({ source: { startJob: fromJobId }, params, chatId, mesId, src, wrap: anchor });
+    } catch (error) {
+        console.error(LOG, error);
+        renderStatus(anchor, `❌ ${error?.message || error}`, { error: true });
+        toastr.error(String(error?.message || error), TOAST_TITLE);
+    } finally {
+        btn.classList.remove('tv-busy');
+        btn.disabled = false;
+    }
+}
+
 async function onVideoButtonClick(img, wrap, btn) {
     const settings = getSettings();
     const mesEl = img.closest('.mes');
@@ -1331,26 +1417,104 @@ function attachButton(img) {
         img.parentNode.insertBefore(wrap, img);
         wrap.appendChild(img);
     }
-    if (wrap.querySelector(':scope > .tv-btn')) return;
+    const mesId = Number(img.closest('.mes')?.getAttribute('mesid'));
 
+    if (!wrap.querySelector(':scope > .tv-btn')) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tv-btn';
+        btn.title = 'Сделать видео из этой картинки';
+        btn.setAttribute('aria-label', 'Сделать видео');
+        btn.textContent = '🎬';
+        btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onVideoButtonClick(img, wrap, btn);
+        });
+        wrap.appendChild(btn);
+
+        // Restore the status line of running / recently finished jobs after a re-render.
+        if (Number.isInteger(mesId)) {
+            const { text, error } = statusLineFor(currentChatId(), mesId, src);
+            if (text) renderStatus(wrap, text, { error });
+        }
+    }
+
+    if (Number.isInteger(mesId)) syncContinueButton(img, wrap, mesId);
+}
+
+/** ⏩ next to 🎬 — only when the message has a finished clip to continue from. */
+function syncContinueButton(img, wrap, mesId) {
+    const message = getMessage(mesId);
+    const done = message?.extra?.[MODULE] ? doneJobIds(message) : [];
+    const existing = wrap.querySelector(':scope > .tv-cont-btn');
+    if (!done.length) {
+        existing?.remove();
+        return;
+    }
+    const lastJobId = done[done.length - 1];
+    if (existing) {
+        existing.dataset.jobId = lastJobId;
+        return;
+    }
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'tv-btn';
-    btn.title = 'Сделать видео из этой картинки';
-    btn.setAttribute('aria-label', 'Сделать видео');
-    btn.textContent = '🎬';
+    btn.className = 'tv-cont-btn';
+    btn.dataset.jobId = lastJobId;
+    btn.title = 'Продолжить движение с последнего кадра готового ролика';
+    btn.setAttribute('aria-label', 'Продолжить');
+    btn.textContent = '⏩';
     btn.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        onVideoButtonClick(img, wrap, btn);
+        onContinueClick({ mesId, fromJobId: btn.dataset.jobId, btn, img });
     });
     wrap.appendChild(btn);
+}
 
-    // Restore the status line of running / recently finished jobs after a re-render.
-    const mesId = Number(img.closest('.mes')?.getAttribute('mesid'));
-    if (Number.isInteger(mesId)) {
-        const { text, error } = statusLineFor(currentChatId(), mesId, src);
-        if (text) renderStatus(wrap, text, { error });
+/** "⏩ Продолжить" bar under every attached video that came from one of our jobs. */
+function scanVideoBars() {
+    const chat = getContext().chat;
+    if (!Array.isArray(chat)) return;
+    for (const mesEl of document.querySelectorAll('#chat .mes')) {
+        const mesId = Number(mesEl.getAttribute('mesid'));
+        const message = chat[mesId];
+        if (!message?.extra?.[MODULE]) continue;
+        const tv = getMessageState(message);
+        const byVideo = new Map();
+        for (const [jobId, record] of Object.entries(tv.jobs)) {
+            if (record?.status === 'done' && record.video) byVideo.set(record.video, jobId);
+        }
+        if (!byVideo.size) continue;
+        for (const container of mesEl.querySelectorAll('.mes_media_wrapper .mes_video_container')) {
+            const index = Number(container.getAttribute('data-index'));
+            const url = message.extra?.media?.[index]?.url;
+            const jobId = url ? byVideo.get(url) : undefined;
+            const existing = container.querySelector(':scope > .tv-video-bar');
+            if (!jobId) {
+                existing?.remove();
+                continue;
+            }
+            if (existing) {
+                existing.querySelector('.tv-video-cont').dataset.jobId = jobId;
+                continue;
+            }
+            const bar = document.createElement('div');
+            bar.className = 'tv-video-bar';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tv-video-cont menu_button';
+            btn.dataset.jobId = jobId;
+            btn.title = 'Продолжить движение с последнего кадра этого ролика';
+            btn.textContent = '⏩ Продолжить';
+            btn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onContinueClick({ mesId, fromJobId: btn.dataset.jobId, btn });
+            });
+            bar.appendChild(btn);
+            container.appendChild(bar);
+        }
     }
 }
 
@@ -1362,6 +1526,11 @@ function scanChat() {
         } catch (error) {
             console.warn(LOG, 'attachButton failed', error);
         }
+    }
+    try {
+        scanVideoBars();
+    } catch (error) {
+        console.warn(LOG, 'scanVideoBars failed', error);
     }
 }
 
@@ -1379,7 +1548,7 @@ function observeChat() {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
                 const el = /** @type {Element} */ (node);
-                if (el.classList?.contains('tv-btn') || el.classList?.contains('tv-status')) continue;
+                if (el.classList?.contains('tv-btn') || el.classList?.contains('tv-cont-btn') || el.classList?.contains('tv-status') || el.classList?.contains('tv-video-bar')) continue;
                 rescan();
                 return;
             }
