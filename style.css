@@ -1,0 +1,175 @@
+/* 🎬 Видео — SillyTavern extension (derryanna) */
+
+/* Wrapper used only when SLAY Images has not wrapped the image itself
+   (mirrors SLAY's .iig-img-wrap so both layouts behave the same). */
+.tv-img-wrap {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    line-height: 0;
+    vertical-align: top;
+}
+
+.tv-img-wrap > img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+}
+
+/* The 🎬 button — bottom-right corner (SLAY's regen button sits top-left). */
+.tv-btn {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 19px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    z-index: 4;
+    opacity: 0.9;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    transition: opacity 0.2s, transform 0.15s, background 0.2s;
+}
+
+/* On devices with a real pointer the button fades out until the image is hovered. */
+@media (hover: hover) and (pointer: fine) {
+    .tv-btn {
+        opacity: 0.55;
+    }
+
+    .iig-img-wrap:hover > .tv-btn,
+    .tv-img-wrap:hover > .tv-btn,
+    .tv-btn:focus-visible {
+        opacity: 1;
+    }
+}
+
+.tv-btn:hover {
+    background: rgba(124, 77, 255, 0.9);
+    transform: scale(1.08);
+}
+
+.tv-btn.tv-busy {
+    cursor: wait;
+    opacity: 1;
+    animation: tv-pulse 1s ease-in-out infinite;
+}
+
+@keyframes tv-pulse {
+    50% {
+        transform: scale(0.88);
+    }
+}
+
+/* One-line status under the image. */
+.tv-status {
+    display: block;
+    font-size: 0.85em;
+    line-height: 1.4;
+    opacity: 0.85;
+    margin: 4px 0 6px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.tv-status.tv-status-error {
+    color: var(--warning, #ff6b6b);
+    opacity: 1;
+}
+
+/* Popup */
+.tv-popup {
+    text-align: left;
+}
+
+.tv-popup h3 {
+    margin-top: 0;
+}
+
+.tv-popup .tv-preview {
+    text-align: center;
+    margin-bottom: 8px;
+}
+
+.tv-popup .tv-preview img {
+    max-height: 180px;
+    max-width: 100%;
+    border-radius: 6px;
+}
+
+.tv-popup textarea {
+    width: 100%;
+    min-height: 9em;
+    resize: vertical;
+    font-family: inherit;
+}
+
+.tv-popup .tv-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.tv-popup .tv-grid label,
+.tv-popup .tv-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.9em;
+}
+
+.tv-popup .tv-radios {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 10px;
+}
+
+.tv-popup .tv-radios label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+
+/* Settings drawer */
+.tavern-video-settings .inline-drawer-content > label,
+.tavern-video-settings .tv-field > label {
+    margin-top: 6px;
+}
+
+.tavern-video-settings .tv-row {
+    display: flex;
+    gap: 8px;
+}
+
+.tavern-video-settings .tv-row > div {
+    flex: 1;
+    min-width: 0;
+}
+
+.tavern-video-settings textarea {
+    width: 100%;
+    min-height: 8em;
+    resize: vertical;
+}
+
+.tavern-video-settings .tv-hint {
+    font-size: 0.8em;
+    opacity: 0.7;
+    margin-top: 2px;
+}
