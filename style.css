@@ -146,6 +146,68 @@
     cursor: pointer;
 }
 
+/* LoRA checklist in the popup */
+.tv-popup .tv-lora-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.tv-popup .tv-lora-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    max-height: 30vh;
+    overflow-y: auto;
+}
+
+.tv-popup .tv-lora-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tv-popup .tv-lora-pick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 0.92em;
+}
+
+.tv-popup .tv-lora-pick input[type="checkbox"] {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+}
+
+.tv-popup .tv-lora-group {
+    font-size: 0.8em;
+    opacity: 0.6;
+}
+
+.tv-popup .tv-lora-triggers {
+    font-size: 0.8em;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tv-popup .tv-lora-strength {
+    width: 5em;
+    flex-shrink: 0;
+}
+
+.tv-popup .tv-lora-empty {
+    padding: 4px 0;
+}
+
 /* Settings drawer */
 .tavern-video-settings .inline-drawer-content > label,
 .tavern-video-settings .tv-field > label {
@@ -172,4 +234,21 @@
     font-size: 0.8em;
     opacity: 0.7;
     margin-top: 2px;
+}
+
+.tavern-video-settings .tv-catalog {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 12em;
+    overflow-y: auto;
+}
+
+.tavern-video-settings .tv-catalog-row span {
+    opacity: 0.8;
+}
+
+.tavern-video-settings .tv-catalog-hint {
+    opacity: 0.7;
+    padding-left: 1em;
 }
