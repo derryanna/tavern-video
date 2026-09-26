@@ -16,6 +16,9 @@ Endpoints (prefix is empty by default, see --prefix):
                                                                   "quality": ..., "smooth": ..., "start_job": ...}
     GET  {prefix}/video/jobs/{id}/file  the rendered mp4
     GET  {prefix}/video/jobs/{id}/last  PNG of the last frame of a finished job (96x64 here)
+    POST {prefix}/video/join            glue finished jobs    -> {"id": "..."}
+         body: jobs [id, id, ...] (2+, all done), xfade 0..1, deliver chat|tg|both, chat, message_id, prompt
+         the result is a normal job with "kind": "join" (rendered in half the usual time)
     POST {prefix}/v1/chat/completions   fake vision model (OpenAI chat format, returns JSON {"lora","prompt"})
     GET  {prefix}/v1/models             model list for the fake vision model
     GET  {prefix}/  or /health          {"ok": true, "comfy": "mock"}  (settings «Тест» button)
@@ -222,8 +225,9 @@ def render_worker(job_id):
     with LOCK:
         job["status"] = "rendering"
         job["started"] = now()
-    log(f"job {job_id}: rendering ({ARGS.render_seconds}s)")
-    time.sleep(ARGS.render_seconds)
+    render_seconds = ARGS.render_seconds / 2 if job.get("kind") == "join" else ARGS.render_seconds
+    log(f"job {job_id}: {'joining' if job.get('kind') == 'join' else 'rendering'} ({render_seconds}s)")
+    time.sleep(render_seconds)
     with LOCK:
         if ARGS.fail or "[fail]" in job["request"].get("prompt", "").lower():
             job["status"] = "error"
@@ -262,6 +266,9 @@ def job_public(job):
         "quality": job.get("quality"),
         "smooth": job.get("smooth"),
         "start_job": job.get("start_job"),
+        "kind": job.get("kind", "render"),
+        "parts": job.get("parts"),
+        "xfade": job.get("xfade"),
     }
 
 
@@ -486,6 +493,52 @@ class Handler(BaseHTTPRequestHandler):
                 + f" deliver={deliver} chat={body.get('chat')!r} message_id={body.get('message_id')}"
             )
             log(f"job {job_id}: prompt: {prompt}")
+            threading.Thread(target=render_worker, args=(job_id,), daemon=True).start()
+            return self.send_json(200, {"id": job_id})
+
+        if path == "/video/join":
+            if not self.authorized():
+                return self.send_json(401, {"error": "unauthorized"})
+            ids = body.get("jobs") or []
+            if isinstance(ids, str):
+                ids = [ids]
+            ids = [str(i).strip() for i in ids if str(i).strip()]
+            if len(ids) < 2:
+                return self.send_json(400, {"error": "need at least 2 clips to join"})
+            if len(set(ids)) != len(ids):
+                return self.send_json(400, {"error": "the same clip is listed twice"})
+            for i in ids:
+                parent = JOBS.get(i)
+                if not parent:
+                    return self.send_json(400, {"error": f"clip {i} is not a finished video (gone or still rendering)"})
+                if parent["status"] != "done":
+                    return self.send_json(400, {"error": f"clip {i} is not a finished video (gone or still rendering)"})
+            try:
+                xfade = max(0.0, min(1.0, float(body.get("xfade") or 0)))
+            except (TypeError, ValueError):
+                return self.send_json(400, {"error": "xfade must be a number of seconds"})
+            deliver = body.get("deliver") or "chat"
+            if deliver not in ("chat", "tg", "both"):
+                return self.send_json(400, {"error": "deliver must be chat|tg|both"})
+            job_id = uuid.uuid4().hex[:12]
+            job = {
+                "id": job_id,
+                "kind": "join",
+                "status": "queued",
+                "created": now(),
+                "started": None,
+                "finished": None,
+                "error": None,
+                "video_url": None,
+                "deliver": deliver,
+                "parts": ids,
+                "xfade": xfade,
+                "request": dict(body),
+            }
+            with LOCK:
+                JOBS[job_id] = job
+                ORDER.append(job_id)
+            log(f"job {job_id}: join created parts={ids} xfade={xfade} deliver={deliver} chat={body.get('chat')!r} message_id={body.get('message_id')}")
             threading.Thread(target=render_worker, args=(job_id,), daemon=True).start()
             return self.send_json(200, {"id": job_id})
 

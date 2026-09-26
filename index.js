@@ -8,6 +8,7 @@
  * When the render is done the video is uploaded to SillyTavern and attached
  * to the message via `message.extra.media` (native ST 1.18 video attachment).
  * ⏩ continues the motion from the last frame of a finished clip (start_job).
+ * 🔗 glues finished clips of a message into one video (POST /video/join, no re-render).
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
@@ -31,6 +32,12 @@ const RESOLUTIONS = [480, 720];
 const QUALITIES = ['fast', 'hi'];
 const MAX_COUNT = 3;
 const ERROR_STATUS_TTL_MS = 5 * 60 * 1000;
+/** 🔗: seam between clips — hard cut or a short dissolve (seconds, sent as `xfade`). */
+const XFADE_OPTIONS = [
+    { value: 0, label: 'встык' },
+    { value: 0.25, label: 'плавно, 0.25 с' },
+    { value: 0.5, label: 'плавно, 0.5 с' },
+];
 
 export const DEFAULT_SYSTEM_PROMPT = [
     'You turn one frame of an adult anime roleplay (all characters are adults, fictional, consenting) into a prompt for the Wan 2.2 image-to-video model.',
@@ -68,6 +75,7 @@ const DEFAULTS = Object.freeze({
     count: 1,
     negExtra: '',
     deliver: 'chat',
+    xfade: 0,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     maxTokens: 800,
 });
@@ -897,7 +905,9 @@ function statusFromResponse(status) {
             return { icon: '⏳', label: 'в очереди', position: Number.isFinite(pos) && pos > 0 ? pos : 0 };
         }
         case 'rendering':
-            return { icon: '🎬', label: `рендерю ${formatElapsed(status.elapsed)}` };
+            return status.kind === 'join'
+                ? { icon: '🔗', label: `склеиваю ${formatElapsed(status.elapsed)}` }
+                : { icon: '🎬', label: `рендерю ${formatElapsed(status.elapsed)}` };
         case 'done':
             return { icon: '✅', label: 'готово' };
         case 'error':
@@ -1251,6 +1261,8 @@ async function launchJobs({ source, params, chatId, mesId, src, wrap }) {
                 prompt: params.prompt,
                 src,
                 seed: seeds[i],
+                sec: params.sec,
+                res: params.res,
                 quality: params.quality,
                 smooth: !!params.smooth,
                 start_job: source.startJob || undefined,
@@ -1343,6 +1355,187 @@ async function onContinueClick({ mesId, fromJobId, btn, img = null }) {
         if (!params) return;
 
         await launchJobs({ source: { startJob: fromJobId }, params, chatId, mesId, src, wrap: anchor });
+    } catch (error) {
+        console.error(LOG, error);
+        renderStatus(anchor, `❌ ${error?.message || error}`, { error: true });
+        toastr.error(String(error?.message || error), TOAST_TITLE);
+    } finally {
+        btn.classList.remove('tv-busy');
+        btn.disabled = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 🔗 Склеить: finished clips of one message → POST /video/join → one more video on the message
+// ---------------------------------------------------------------------------
+
+function pluralClips(n) {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return `${n} ролик`;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} ролика`;
+    return `${n} роликов`;
+}
+
+/** Finished clips of a message in creation order: [{id, record}]. */
+function doneClipsInOrder(tv) {
+    return Object.entries(tv.jobs)
+        .filter(([, record]) => record?.status === 'done')
+        .sort((a, b) => (Number(a[1].n) || 0) - (Number(b[1].n) || 0) || (a[1].updated || 0) - (b[1].updated || 0))
+        .map(([id, record]) => ({ id, record }));
+}
+
+/** The clip, everything it continues (start_job links back) and everything continued from it — what 🔗 pre-selects. */
+function lineageOf(tv, jobId) {
+    const picked = new Set();
+    let current = jobId;
+    while (current && tv.jobs[current] && !picked.has(current)) {
+        picked.add(current);
+        current = tv.jobs[current].start_job;
+    }
+    const queue = [jobId];
+    while (queue.length) {
+        const id = queue.shift();
+        for (const [childId, record] of Object.entries(tv.jobs)) {
+            if (record?.start_job === id && !picked.has(childId)) {
+                picked.add(childId);
+                queue.push(childId);
+            }
+        }
+    }
+    return picked;
+}
+
+function clipMeta(record) {
+    const bits = [];
+    if (record.kind === 'join') {
+        bits.push(`🔗 склейка × ${Array.isArray(record.parts) ? record.parts.length : '?'}`);
+    } else {
+        if (record.sec) bits.push(`${record.sec} с`);
+        if (record.quality === 'hi') bits.push('лучше');
+        if (record.smooth) bits.push('32 fps');
+        if (record.start_job) bits.push('⏩');
+    }
+    return bits.join(' · ');
+}
+
+/**
+ * Popup with a checklist of the message's finished clips (order = order in the message), seam type and destination.
+ * @returns {Promise<{jobs: string[], xfade: number, deliver: string}|null>}
+ */
+async function showJoinPopup({ clips, preselected }) {
+    const settings = getSettings();
+    const rows = clips.map(({ id, record }) => {
+        const checked = preselected.has(id) ? ' checked' : '';
+        const promptHead = String(record.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 90);
+        return `<label class="tv-join-row">
+            <input type="checkbox" class="tv-join-check" value="${escapeHtml(id)}"${checked}>
+            <b>#${escapeHtml(record.n ?? '?')}</b>
+            <span class="tv-join-meta">${escapeHtml(clipMeta(record))}</span>
+            <span class="tv-join-prompt" title="${escapeHtml(record.prompt || '')}">${escapeHtml(promptHead)}</span>
+        </label>`;
+    }).join('');
+    const xfadeOptions = XFADE_OPTIONS.map(o => `<option value="${o.value}"${Number(settings.xfade) === o.value ? ' selected' : ''}>${o.label}</option>`).join('');
+    const deliverLabels = { chat: 'чат', tg: 'телеграм', both: 'оба' };
+    const deliverRadios = DELIVER.map(v => `<label><input type="radio" name="tv_j_deliver" value="${v}"${v === settings.deliver ? ' checked' : ''}> ${deliverLabels[v]}</label>`).join('');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'tv-popup';
+    wrapper.innerHTML = `
+        <h3>🔗 Склеить</h3>
+        <div class="tv-lora-head"><span>Ролики</span><span class="tv-hint">галочка = попадёт в склейку, порядок = порядок в сообщении</span></div>
+        <div class="tv-join-list">${rows}</div>
+        <p class="tv-hint">⏩-продолжения склеиваются кадр в кадр (ничего не повторяется). Разный fps выравнивается по большему, размер — по первому ролику. Без перерендера, несколько секунд.</p>
+        <div class="tv-radios">
+            <label>Стык <select id="tv_j_xfade" class="text_pole">${xfadeOptions}</select></label>
+            <span class="tv-radios-sep"></span>
+            <span>Куда:</span>${deliverRadios}
+        </div>`;
+
+    let captured = null;
+    const capture = () => {
+        captured = {
+            jobs: Array.from(wrapper.querySelectorAll('.tv-join-check:checked')).map(el => el.value),
+            xfade: clampFloat(wrapper.querySelector('#tv_j_xfade').value, 0, 1, 0),
+            deliver: wrapper.querySelector('input[name="tv_j_deliver"]:checked')?.value || settings.deliver,
+        };
+    };
+
+    const result = await callGenericPopup(wrapper, POPUP_TYPE.CONFIRM, '', {
+        okButton: 'Склеить',
+        cancelButton: 'Отмена',
+        wide: true,
+        allowVerticalScrolling: true,
+        onClosing: (popup) => {
+            if (popup.result === POPUP_RESULT.AFFIRMATIVE) {
+                capture();
+                if (captured.jobs.length < 2) {
+                    toastr.warning('Отметь хотя бы два ролика', TOAST_TITLE);
+                    return false;
+                }
+            }
+            return true;
+        },
+    });
+
+    if (result !== POPUP_RESULT.AFFIRMATIVE || !captured) return null;
+    settings.xfade = captured.xfade;
+    saveSettingsDebounced();
+    return captured;
+}
+
+/**
+ * 🔗 under a video: pick clips → POST /video/join → poll like any job → the joined video is attached to the same message.
+ * @param {object} opts
+ * @param {number} opts.mesId
+ * @param {string} opts.jobId   the clip whose bar was clicked (its lineage is pre-selected)
+ * @param {HTMLElement} opts.btn
+ */
+async function onJoinClick({ mesId, jobId, btn }) {
+    const settings = getSettings();
+    const chatId = currentChatId();
+    const message = getMessage(mesId);
+    if (!message) {
+        toastr.error(`Сообщение #${mesId} не найдено`, TOAST_TITLE);
+        return;
+    }
+    const tv = getMessageState(message);
+    const clips = doneClipsInOrder(tv);
+    if (clips.length < 2) {
+        toastr.info('В этом сообщении пока один готовый ролик — склеивать не с чем', TOAST_TITLE);
+        return;
+    }
+    if (!String(settings.bridgeUrl || '').trim()) {
+        toastr.error('Укажи адрес бриджа в настройках «🎬 Видео»', TOAST_TITLE);
+        return;
+    }
+    if (btn.classList.contains('tv-busy')) return;
+
+    const src = tv.jobs[jobId]?.src || tv.src || '';
+    const anchor = findImageWrap(mesId, src);
+    btn.classList.add('tv-busy');
+    btn.disabled = true;
+    try {
+        const params = await showJoinPopup({ clips, preselected: lineageOf(tv, jobId) });
+        if (!params) return;
+        renderStatus(anchor, '📤 отправляю склейку…');
+        const prompt = `🔗 склейка: ${pluralClips(params.jobs.length)}`;
+        const body = { jobs: params.jobs, xfade: params.xfade, deliver: params.deliver, chat: chatId, message_id: mesId, prompt };
+        const json = await bridgeFetchJson('/video/join', { method: 'POST', body: JSON.stringify(body) });
+        if (!json?.id) throw new Error('бридж не вернул id задачи');
+        const id = String(json.id);
+        const n = Object.keys(tv.jobs).length + 1;
+        writeJobRecord(message, id, {
+            n, status: 'queued', deliver: params.deliver, prompt, src,
+            kind: 'join', parts: params.jobs, xfade: params.xfade,
+        });
+        try {
+            await getContext().saveChat();
+        } catch (error) {
+            console.warn(LOG, 'saveChat failed', error);
+        }
+        startPolling(makeJobState({ id, chatId, mesId, src, n, deliver: params.deliver, prompt, icon: '🔗', label: 'склеиваю…' }));
+        renderStatusFor(chatId, mesId, src);
     } catch (error) {
         console.error(LOG, error);
         renderStatus(anchor, `❌ ${error?.message || error}`, { error: true });
@@ -1473,7 +1666,32 @@ function syncContinueButton(img, wrap, mesId) {
     wrap.appendChild(btn);
 }
 
-/** "⏩ Продолжить" bar under every attached video that came from one of our jobs. */
+/** 🔗 in a video bar: present when the message has at least two finished clips, points at the bar's own clip. */
+function syncJoinButton(bar, canJoin, jobId, mesId) {
+    let join = bar.querySelector(':scope > .tv-video-join');
+    if (!canJoin) {
+        join?.remove();
+        return;
+    }
+    if (join) {
+        join.dataset.jobId = jobId;
+        return;
+    }
+    join = document.createElement('button');
+    join.type = 'button';
+    join.className = 'tv-video-join menu_button';
+    join.dataset.jobId = jobId;
+    join.title = 'Склеить ролики этого сообщения в одно видео (этот ролик и его продолжения отмечены заранее)';
+    join.textContent = '🔗 Склеить';
+    join.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onJoinClick({ mesId, jobId: join.dataset.jobId, btn: join });
+    });
+    bar.appendChild(join);
+}
+
+/** "⏩ Продолжить" (+ "🔗 Склеить") bar under every attached video that came from one of our jobs. */
 function scanVideoBars() {
     const chat = getContext().chat;
     if (!Array.isArray(chat)) return;
@@ -1487,6 +1705,7 @@ function scanVideoBars() {
             if (record?.status === 'done' && record.video) byVideo.set(record.video, jobId);
         }
         if (!byVideo.size) continue;
+        const canJoin = byVideo.size >= 2;
         for (const container of mesEl.querySelectorAll('.mes_media_wrapper .mes_video_container')) {
             const index = Number(container.getAttribute('data-index'));
             const url = message.extra?.media?.[index]?.url;
@@ -1498,6 +1717,7 @@ function scanVideoBars() {
             }
             if (existing) {
                 existing.querySelector('.tv-video-cont').dataset.jobId = jobId;
+                syncJoinButton(existing, canJoin, jobId, mesId);
                 continue;
             }
             const bar = document.createElement('div');
@@ -1514,6 +1734,7 @@ function scanVideoBars() {
                 onContinueClick({ mesId, fromJobId: btn.dataset.jobId, btn });
             });
             bar.appendChild(btn);
+            syncJoinButton(bar, canJoin, jobId, mesId);
             container.appendChild(bar);
         }
     }

@@ -63,7 +63,8 @@
 
 .tv-btn.tv-busy,
 .tv-cont-btn.tv-busy,
-.tv-video-cont.tv-busy {
+.tv-video-cont.tv-busy,
+.tv-video-join.tv-busy {
     cursor: wait;
     opacity: 1;
     animation: tv-pulse 1s ease-in-out infinite;
@@ -123,13 +124,55 @@
 .tv-video-bar {
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
     padding: 4px 0 0;
 }
 
-.tv-video-bar .tv-video-cont {
+.tv-video-bar .tv-video-cont,
+.tv-video-bar .tv-video-join {
     font-size: 0.85em;
     padding: 2px 10px;
     min-height: 32px;
+    white-space: nowrap;
+}
+
+/* 🔗 popup: one row per finished clip. */
+.tv-popup .tv-join-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 40vh;
+    overflow: auto;
+    margin: 4px 0 8px;
+}
+
+.tv-popup .tv-join-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.tv-popup .tv-join-row input[type="checkbox"] {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.tv-popup .tv-join-meta {
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.tv-popup .tv-join-prompt {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.85em;
+    opacity: 0.85;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
 }
 
