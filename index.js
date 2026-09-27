@@ -42,7 +42,7 @@ const XFADE_OPTIONS = [
 export const DEFAULT_SYSTEM_PROMPT = [
     'You turn one frame of an adult anime roleplay (all characters are adults, fictional, consenting) into a prompt for the Wan 2.2 image-to-video model.',
     'Wan reads natural English sentences, not tags. The frame already fixes who is there and where; your job is the MOTION of the next few seconds.',
-    'Output JSON only: {"lora": ["set", ...], "prompt": "..."}',
+    'Output JSON only: {"lora": ["set", ...], "prompt": "...", "sound": "..."}',
     'lora: the names of the LoRA sets from the list at the end of this prompt that fit the frame (several allowed, [] if none): the explicit set when the frame shows an explicit sex act, the nsfw set for nudity or sensual touching, nothing otherwise.',
     'The prompt is ONE paragraph of 60-100 words, present tense, third person, built in this order:',
     '1. Only if a chosen set has trigger words: the single trigger word for the position comes first, taken from that set\'s trigger list.',
@@ -52,15 +52,17 @@ export const DEFAULT_SYSTEM_PROMPT = [
     '5. Camera and light: "static shot", the shot size that matches the frame (close-up, medium close-up, medium shot, wide shot), the lighting (soft morning light, warm lamp light, dim room...).',
     '6. Finish with "smooth continuous motion, high quality".',
     'Rules: describe only what can move from this exact frame; no new characters, no scene change, no cuts, no "then" or "after"; no negations (never write "no", "without", "not"); no tag lists; the image-model tags you get are for reference only, do not copy them; be literal and explicit when the frame is explicit; no disclaimers.',
-    'Example: {"lora": [], "prompt": "Anime style, soft painterly illustration with a warm palette. The silver-haired man leans over the sleeping blonde woman in bed and slowly strokes her hair, his hand moving in gentle repeated passes from her temple to the pillow. Her chest rises and falls with slow breathing, her lips part slightly, loose strands of hair shift under his fingers. Static shot, medium close-up, soft overcast morning light from the window. Smooth continuous motion, high quality."}',
+    'sound: 5-12 English words, comma separated, naming what is HEARD during these seconds (a video-to-audio model reads them): wordless voices and noises only, e.g. soft moans, heavy panting, wet rhythmic slapping, bed creaking, fabric rustle, rain on the window, quiet room tone. Never words, dialogue or music. Loud and explicit when the act is explicit, sparse and quiet when the scene is calm.',
+    'Example: {"lora": [], "prompt": "Anime style, soft painterly illustration with a warm palette. The silver-haired man leans over the sleeping blonde woman in bed and slowly strokes her hair, his hand moving in gentle repeated passes from her temple to the pillow. Her chest rises and falls with slow breathing, her lips part slightly, loose strands of hair shift under his fingers. Static shot, medium close-up, soft overcast morning light from the window. Smooth continuous motion, high quality.", "sound": "slow soft breathing, hair rustling on the pillow, quiet room tone"}',
 ].join('\n');
 // earlier releases: v1 asked for character names via {NAMES}, v2 wrote two-line FRAME/VIDEO-ish prompts, v3 and the first
-// catalogue-aware prompt hard-coded the LoRA names; saved copies of those are migrated to the current default
+// catalogue-aware prompt hard-coded the LoRA names, 1.0/1.1 had no "sound" field; saved copies of those are migrated to the current default
 const LEGACY_PROMPT_MARKERS = [
     'Use these English names for the characters: {NAMES}',
     'Never use character names: say "the man"',
     '{"lora": "none|nsfw|dreamlay"',
     'lists the names of the LoRA sets from the list below',
+    'Output JSON only: {"lora": ["set", ...], "prompt": "..."}',
 ];
 
 const DEFAULTS = Object.freeze({
@@ -72,6 +74,7 @@ const DEFAULTS = Object.freeze({
     res: 480,
     quality: 'fast',
     smooth: false,
+    sound: true,
     count: 1,
     negExtra: '',
     deliver: 'chat',
@@ -129,6 +132,7 @@ const SETTINGS_HTML = `
                 <div class="tv-row"><label for="tv_quality">Качество</label><select id="tv_quality" class="text_pole"><option value="fast">быстро</option><option value="hi">лучше</option></select></div>
                 <div class="tv-row"><label for="tv_count">Роликов</label><input id="tv_count" class="text_pole" type="number" min="1" max="3" step="1"></div>
                 <label class="checkbox_label tv-check" for="tv_smooth"><input id="tv_smooth" type="checkbox"><span>32 fps (интерполяция)</span></label>
+                <label class="checkbox_label tv-check" for="tv_sound"><input id="tv_sound" type="checkbox"><span>🔊 Звук (MMAudio дорисовывает звук к готовому ролику)</span></label>
                 <div class="tv-row"><label for="tv_neg_extra">Негатив</label><input id="tv_neg_extra" class="text_pole" type="text" placeholder="что не должно появиться (neg_extra)" autocomplete="off"></div>
                 <div class="tv-row"><label for="tv_deliver">Куда</label><select id="tv_deliver" class="text_pole"><option value="chat">чат</option><option value="tg">телеграм</option><option value="both">оба</option></select></div>
                 <p class="tv-hint">Это значения по умолчанию для попапа — там всё можно поменять. LoRA-сеты модель выбирает сама по кадру из каталога ниже.</p>
@@ -179,6 +183,7 @@ function bindSettingsUi() {
     const $quality = $('#tv_quality').val(settings.quality);
     const $count = $('#tv_count').val(settings.count);
     const $smooth = $('#tv_smooth').prop('checked', !!settings.smooth);
+    const $sound = $('#tv_sound').prop('checked', !!settings.sound);
     const $negExtra = $('#tv_neg_extra').val(settings.negExtra);
     const $deliver = $('#tv_deliver').val(settings.deliver);
     const $sysprompt = $('#tv_sysprompt').val(settings.systemPrompt);
@@ -195,6 +200,7 @@ function bindSettingsUi() {
     $quality.on('change', () => { settings.quality = QUALITIES.includes(String($quality.val())) ? String($quality.val()) : 'fast'; save(); });
     $count.on('input', () => { settings.count = clampInt($count.val(), 1, MAX_COUNT, 1); save(); });
     $smooth.on('change', () => { settings.smooth = $smooth.prop('checked'); save(); });
+    $sound.on('change', () => { settings.sound = $sound.prop('checked'); save(); });
     $negExtra.on('input', () => { settings.negExtra = String($negExtra.val()).trim(); save(); });
     $deliver.on('change', () => { settings.deliver = DELIVER.includes(String($deliver.val())) ? String($deliver.val()) : 'chat'; save(); });
     $sysprompt.on('input', () => { settings.systemPrompt = String($sysprompt.val()); save(); });
@@ -629,7 +635,7 @@ function isChatCompletionProfile(profile) {
 }
 
 /**
- * @returns {{ loras: LoraSet[], prompt: string }}
+ * @returns {{ loras: LoraSet[], prompt: string, sound: string }}
  */
 function parseModelJson(raw) {
     let text = String(raw ?? '').trim();
@@ -641,13 +647,14 @@ function parseModelJson(raw) {
             const obj = JSON.parse(text.slice(start, end + 1));
             const loras = resolveLoraNames(obj.lora ?? obj.loras);
             const prompt = String(obj.prompt ?? '').trim();
-            if (prompt) return { loras, prompt };
+            const sound = typeof obj.sound === 'string' ? obj.sound.trim().slice(0, 300) : '';
+            if (prompt) return { loras, prompt, sound };
         } catch (error) {
             console.warn(LOG, 'model JSON parse failed', error, text);
         }
     }
     if (!text) throw new Error('модель вернула пустой ответ');
-    return { loras: [], prompt: text };
+    return { loras: [], prompt: text, sound: '' };
 }
 
 async function askVisionModel(payload) {
@@ -717,7 +724,7 @@ function renderLoraChecklist(selected) {
     }).join('');
 }
 
-async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Видео' }) {
+async function showJobPopup({ prompt, loras = [], sound = '', previewSrc, title = '🎬 Видео' }) {
     const settings = getSettings();
     const resOptions = RESOLUTIONS.map(v => `<option value="${v}"${v === Number(settings.res) ? ' selected' : ''}>${v}</option>`).join('');
     const qualityLabels = { fast: 'быстро', hi: 'лучше' };
@@ -742,8 +749,10 @@ async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Ви
             <label>Роликов <input id="tv_p_count" class="text_pole" type="number" min="1" max="${MAX_COUNT}" step="1" value="${escapeHtml(settings.count)}"></label>
         </div>
         <label class="tv-field"><span>Негатив (дополнительно)</span><input id="tv_p_neg" class="text_pole" type="text" placeholder="что не должно появиться" value="${escapeHtml(settings.negExtra)}"></label>
+        <label class="tv-field"><span>🔊 Звук (что слышно, по-английски)</span><input id="tv_p_sound_prompt" class="text_pole" type="text" placeholder="пусто = звук только по картинке" value="${escapeHtml(sound)}"></label>
         <div class="tv-radios">
             <label><input type="checkbox" id="tv_p_smooth"${settings.smooth ? ' checked' : ''}> 32 fps</label>
+            <label><input type="checkbox" id="tv_p_sound"${settings.sound ? ' checked' : ''}> 🔊 звук</label>
             <span class="tv-radios-sep"></span>
             <span>Куда:</span>${deliverRadios}
         </div>`;
@@ -767,6 +776,8 @@ async function showJobPopup({ prompt, loras = [], previewSrc, title = '🎬 Ви
             seed: seedRaw === '' ? null : clampInt(seedRaw, -2147483648, 4294967295, null),
             quality: QUALITIES.includes(wrapper.querySelector('#tv_p_quality').value) ? wrapper.querySelector('#tv_p_quality').value : 'fast',
             smooth: !!wrapper.querySelector('#tv_p_smooth').checked,
+            sound: !!wrapper.querySelector('#tv_p_sound').checked,
+            soundPrompt: String(wrapper.querySelector('#tv_p_sound_prompt').value || '').trim().slice(0, 300),
             count: clampInt(wrapper.querySelector('#tv_p_count').value, 1, MAX_COUNT, 1),
             negExtra: String(wrapper.querySelector('#tv_p_neg').value || '').trim(),
             deliver: wrapper.querySelector('input[name="tv_p_deliver"]:checked')?.value || settings.deliver,
@@ -924,7 +935,7 @@ function getMessage(mesId) {
 
 /**
  * Per-message state stored in `message.extra.tavern_video`:
- * { jobs: {id: {n, status, deliver, prompt, src, seed, quality, smooth, start_job, video, error, updated}},
+ * { jobs: {id: {n, status, deliver, prompt, src, seed, quality, smooth, sound, start_job, video, error, updated}},
  *   chain: [done job ids in completion order], job_id, status, src }
  * `job_id`/`status` mirror the most recently created job (also the v1 format, migrated here).
  */
@@ -1011,11 +1022,13 @@ async function createJob({ base64, mime, startJob, params, seed, chatId, mesId }
         lora: params.loras.map(l => `${l.name}:${formatStrength(l.strength)}`),
         quality: params.quality,
         smooth: !!params.smooth,
+        sound: !!params.sound,
         deliver: params.deliver,
         chat: chatId,
         message_id: mesId,
     };
     if (params.negExtra) body.neg_extra = params.negExtra;
+    if (params.sound && params.soundPrompt) body.sound_prompt = params.soundPrompt;
     if (startJob) {
         body.start_job = startJob;
     } else {
@@ -1075,6 +1088,9 @@ function startPolling(job) {
         switch (status.status) {
             case 'done': {
                 setJobStatus(job, icon, label);
+                if (status.sound && typeof status.audio === 'string' && status.audio.startsWith('failed')) {
+                    toastr.warning(`Ролик без звука: ${status.audio.slice(8)}`, TOAST_TITLE);
+                }
                 if (job.deliver === 'chat' || job.deliver === 'both') {
                     try {
                         setJobStatus(job, '⬇️', 'загружаю видео в чат…');
@@ -1265,6 +1281,7 @@ async function launchJobs({ source, params, chatId, mesId, src, wrap }) {
                 res: params.res,
                 quality: params.quality,
                 smooth: !!params.smooth,
+                sound: !!params.sound,
                 start_job: source.startJob || undefined,
             });
             created.push(makeJobState({ id: jobId, chatId, mesId, src, n, deliver: params.deliver, prompt: params.prompt }));
@@ -1351,7 +1368,7 @@ async function onContinueClick({ mesId, fromJobId, btn, img = null }) {
         });
 
         renderStatusFor(chatId, mesId, src);
-        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: frame.dataUrl, title: '⏩ Продолжить' });
+        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, sound: answer.sound, previewSrc: frame.dataUrl, title: '⏩ Продолжить' });
         if (!params) return;
 
         await launchJobs({ source: { startJob: fromJobId }, params, chatId, mesId, src, wrap: anchor });
@@ -1416,12 +1433,13 @@ function clipMeta(record) {
         if (record.smooth) bits.push('32 fps');
         if (record.start_job) bits.push('⏩');
     }
+    if (record.sound) bits.push('🔊');
     return bits.join(' · ');
 }
 
 /**
  * Popup with a checklist of the message's finished clips (order = order in the message), seam type and destination.
- * @returns {Promise<{jobs: string[], xfade: number, deliver: string}|null>}
+ * @returns {Promise<{jobs: string[], xfade: number, sound: boolean, deliver: string}|null>}
  */
 async function showJoinPopup({ clips, preselected }) {
     const settings = getSettings();
@@ -1445,9 +1463,10 @@ async function showJoinPopup({ clips, preselected }) {
         <h3>🔗 Склеить</h3>
         <div class="tv-lora-head"><span>Ролики</span><span class="tv-hint">галочка = попадёт в склейку, порядок = порядок в сообщении</span></div>
         <div class="tv-join-list">${rows}</div>
-        <p class="tv-hint">⏩-продолжения склеиваются кадр в кадр (ничего не повторяется). Разный fps выравнивается по большему, размер — по первому ролику. Без перерендера, несколько секунд.</p>
+        <p class="tv-hint">⏩-продолжения склеиваются кадр в кадр (ничего не повторяется). Разный fps выравнивается по большему, размер — по первому ролику. Без перерендера, несколько секунд. 🔊: дорожки роликов склеиваются вместе с видео; если какой-то ролик без звука, звук дорисуется на всю склейку.</p>
         <div class="tv-radios">
             <label>Стык <select id="tv_j_xfade" class="text_pole">${xfadeOptions}</select></label>
+            <label><input type="checkbox" id="tv_j_sound"${settings.sound ? ' checked' : ''}> 🔊 звук</label>
             <span class="tv-radios-sep"></span>
             <span>Куда:</span>${deliverRadios}
         </div>`;
@@ -1457,6 +1476,7 @@ async function showJoinPopup({ clips, preselected }) {
         captured = {
             jobs: Array.from(wrapper.querySelectorAll('.tv-join-check:checked')).map(el => el.value),
             xfade: clampFloat(wrapper.querySelector('#tv_j_xfade').value, 0, 1, 0),
+            sound: !!wrapper.querySelector('#tv_j_sound').checked,
             deliver: wrapper.querySelector('input[name="tv_j_deliver"]:checked')?.value || settings.deliver,
         };
     };
@@ -1520,14 +1540,14 @@ async function onJoinClick({ mesId, jobId, btn }) {
         if (!params) return;
         renderStatus(anchor, '📤 отправляю склейку…');
         const prompt = `🔗 склейка: ${pluralClips(params.jobs.length)}`;
-        const body = { jobs: params.jobs, xfade: params.xfade, deliver: params.deliver, chat: chatId, message_id: mesId, prompt };
+        const body = { jobs: params.jobs, xfade: params.xfade, sound: !!params.sound, deliver: params.deliver, chat: chatId, message_id: mesId, prompt };
         const json = await bridgeFetchJson('/video/join', { method: 'POST', body: JSON.stringify(body) });
         if (!json?.id) throw new Error('бридж не вернул id задачи');
         const id = String(json.id);
         const n = Object.keys(tv.jobs).length + 1;
         writeJobRecord(message, id, {
             n, status: 'queued', deliver: params.deliver, prompt, src,
-            kind: 'join', parts: params.jobs, xfade: params.xfade,
+            kind: 'join', parts: params.jobs, xfade: params.xfade, sound: !!params.sound,
         });
         try {
             await getContext().saveChat();
@@ -1576,7 +1596,7 @@ async function onVideoButtonClick(img, wrap, btn) {
         const answer = await askVisionModel({ base64, mime, instruction, text });
 
         renderStatusFor(chatId, mesId, src);
-        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, previewSrc: img.currentSrc || src });
+        const params = await showJobPopup({ prompt: answer.prompt, loras: answer.loras, sound: answer.sound, previewSrc: img.currentSrc || src });
         if (!params) return;
 
         await launchJobs({ source: { base64, mime }, params, chatId, mesId, src, wrap });

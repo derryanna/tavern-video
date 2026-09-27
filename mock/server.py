@@ -11,7 +11,8 @@ Endpoints (prefix is empty by default, see --prefix):
     GET  {prefix}/video/loras           LoRA catalogue        -> {"loras": [{"name","triggers","hint","strength","group"}]}
     POST {prefix}/video/jobs            create a job          -> {"id": "..."}
          body: image (base64) | start_job, prompt, sec, res, seed, lora ["set:strength", ...],
-               quality "fast"|"hi", smooth bool, neg_extra str, deliver chat|tg|both, chat, message_id
+               quality "fast"|"hi", smooth bool, neg_extra str, deliver chat|tg|both, chat, message_id,
+               sound bool, sound_prompt str
     GET  {prefix}/video/jobs/{id}       job status            -> {"status": ..., "position": n, "elapsed": s, "error": "...", "video_url": "...",
                                                                   "quality": ..., "smooth": ..., "start_job": ...}
     GET  {prefix}/video/jobs/{id}/file  the rendered mp4
@@ -269,6 +270,8 @@ def job_public(job):
         "kind": job.get("kind", "render"),
         "parts": job.get("parts"),
         "xfade": job.get("xfade"),
+        "sound": job.get("sound", False),
+        "audio": job.get("audio"),
     }
 
 
@@ -465,6 +468,12 @@ class Handler(BaseHTTPRequestHandler):
             neg_extra = body.get("neg_extra", "")
             if neg_extra is not None and not isinstance(neg_extra, str):
                 return self.send_json(400, {"error": "neg_extra must be a string"})
+            sound = body.get("sound", False)
+            if not isinstance(sound, bool):
+                return self.send_json(400, {"error": "sound must be a boolean"})
+            sound_prompt = body.get("sound_prompt", "")
+            if sound_prompt is not None and not isinstance(sound_prompt, str):
+                return self.send_json(400, {"error": "sound_prompt must be a string"})
             job_id = uuid.uuid4().hex[:12]
             job = {
                 "id": job_id,
@@ -478,6 +487,9 @@ class Handler(BaseHTTPRequestHandler):
                 "quality": quality,
                 "smooth": smooth,
                 "neg_extra": neg_extra or "",
+                "sound": sound,
+                "sound_prompt": sound_prompt or "",
+                "audio": "ok" if sound else None,
                 "start_job": start_job,
                 "request": {k: v for k, v in body.items() if k != "image"},
             }
@@ -489,7 +501,7 @@ class Handler(BaseHTTPRequestHandler):
             log(
                 f"job {job_id}: created {source}"
                 + f" sec={body.get('sec')} res={body.get('res')} seed={body.get('seed')} lora={loras}"
-                + f" quality={quality} smooth={smooth} neg_extra={neg_extra!r}"
+                + f" quality={quality} smooth={smooth} neg_extra={neg_extra!r} sound={sound} sound_prompt={sound_prompt!r}"
                 + f" deliver={deliver} chat={body.get('chat')!r} message_id={body.get('message_id')}"
             )
             log(f"job {job_id}: prompt: {prompt}")
