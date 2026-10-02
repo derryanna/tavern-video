@@ -575,6 +575,11 @@ function buildMessages({ base64, mime, instruction, text, continueFrom = null })
  * used when the profile is not a chat-completion profile, when the CM path failed
  * or when the user enabled "direct" in settings.
  */
+// Thinking models (GLM, Gemini, Kimi) can spend the whole 800-token limit on reasoning and return no JSON:
+// cap it with SillyTavern's reasoning_effort plus the OpenRouter-style body that custom endpoints pass through.
+const REASONING = Object.freeze({ reasoning_effort: 'low', custom_include_body: 'reasoning:
+  effort: low' });
+
 async function directVisionRequest(profile, messages) {
     const context = getContext();
     const settings = getSettings();
@@ -595,7 +600,8 @@ async function directVisionRequest(profile, messages) {
         secret_id: profile['secret-id'],
         reverse_proxy: proxyPreset?.url,
         proxy_password: proxyPreset?.password,
-        custom_include_body: macros(oai.custom_include_body),
+        custom_include_body: macros(oai.custom_include_body) || REASONING.custom_include_body,
+        reasoning_effort: REASONING.reasoning_effort,
         custom_exclude_body: macros(oai.custom_exclude_body),
         custom_include_headers: macros(oai.custom_include_headers),
         custom_prompt_post_processing: profile['prompt-post-processing'] || undefined,
@@ -672,6 +678,7 @@ async function askVisionModel(payload) {
                 messages,
                 settings.maxTokens,
                 { stream: false, extractData: true, includePreset: true, includeInstruct: false },
+                REASONING,
             );
             raw = typeof result === 'string' ? result : result?.content;
         } catch (error) {
